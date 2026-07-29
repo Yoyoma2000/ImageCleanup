@@ -12,18 +12,41 @@ public sealed class OrganizationStagingRepository
         _connectionString = connectionString;
     }
 
-    public void StageAction(int fileRecordId, string action, string? targetPath, string? reason)
+    /// <summary>Inserts a new staging row and returns its Id.</summary>
+    public int StageAction(int fileRecordId, string action, string? targetPath, string? reason)
     {
         using var connection = Open();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = """
             INSERT INTO OrganizationStaging (FileRecordId, Action, TargetPath, Reason, Committed)
             VALUES ($fileRecordId, $action, $targetPath, $reason, 0)
+            RETURNING Id
             """;
         cmd.Parameters.AddWithValue("$fileRecordId", fileRecordId);
         cmd.Parameters.AddWithValue("$action", action);
         cmd.Parameters.AddWithValue("$targetPath", targetPath ?? (object)DBNull.Value);
         cmd.Parameters.AddWithValue("$reason", reason ?? (object)DBNull.Value);
+        return (int)(long)cmd.ExecuteScalar()!;
+    }
+
+    /// <summary>Deletes a single uncommitted staging row by Id.</summary>
+    public void RemoveStagingEntry(int stagingId)
+    {
+        using var connection = Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "DELETE FROM OrganizationStaging WHERE Id = $id AND Committed = 0";
+        cmd.Parameters.AddWithValue("$id", stagingId);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>Updates the TargetPath of an existing staging row (used to sync Move paths before commit).</summary>
+    public void UpdateTargetPath(int stagingId, string? targetPath)
+    {
+        using var connection = Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "UPDATE OrganizationStaging SET TargetPath = $tp WHERE Id = $id";
+        cmd.Parameters.AddWithValue("$tp", targetPath ?? (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("$id", stagingId);
         cmd.ExecuteNonQuery();
     }
 

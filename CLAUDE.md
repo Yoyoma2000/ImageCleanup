@@ -22,3 +22,17 @@ C#/.NET 9, WinUI 3 for UI.
 - Build: dotnet build
 - Test: dotnet test
 - Run: dotnet run --project src/ImageCleanup.App
+
+## Notes
+- App cannot be built via `dotnet build` CLI (MSB4062 — missing PRI/MRT DLL from plain SDK).
+  Build the App project via Visual Studio; Core/Data/tests build fine from CLI.
+- ulong stored as signed long in SQLite; cast on read with (ulong)GetInt64().
+- Always parse DateTime from SQLite with DateTimeStyles.RoundtripKind.
+
+## Status
+Sessions 1–5 complete.
+- Core: DHash, BlurDetector, ExifReader, ScreenshotHeuristic, SuggestionEngine
+- Data: FileCacheRepository, OrganizationStagingRepository, CommitService
+- App: FolderPicker scan pipeline, duplicate review UI, per-file action staging,
+  staging panel with commit flow, confirmation + summary dialogs
+- Tests: Core (hash, quality, heuristics, grouping), Data (cache, staging, commit)

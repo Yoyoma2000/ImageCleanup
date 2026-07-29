@@ -3,12 +3,14 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using ImageCleanup.Core.Grouping;
+using ImageCleanup.Core.Hashing;
 using ImageCleanup.Core.Metadata;
 using ImageCleanup.Core.Quality;
-using ImageCleanup.Core.Hashing;
 using ImageCleanup.Data;
 using ImageCleanup.Data.Models;
 using ImageCleanup.Data.Repositories;
+using ImageCleanup.Data.Services;
+using Microsoft.UI.Xaml;
 
 namespace ImageCleanup.App.ViewModels;
 
@@ -18,28 +20,34 @@ public sealed class MainViewModel : INotifyPropertyChanged
         [".jpg", ".jpeg", ".png", ".webp", ".bmp"];
 
     private readonly string _connectionString;
+    private readonly OrganizationStagingRepository _stagingRepo;
 
-    // ── Observable state ─────────────────────────────────────────────────
+    // ── Observable state ─────────────────────────────────────────────────────
 
     private string _statusText = "Ready — click \"Select Folder\" to start.";
     public string StatusText
     {
         get => _statusText;
-        private set { _statusText = value; OnPropertyChanged(); }
+        private set { _statusText = value; Notify(); }
     }
 
     private bool _isIdle = true;
     public bool IsIdle
     {
         get => _isIdle;
-        private set { _isIdle = value; OnPropertyChanged(); }
+        private set { _isIdle = value; Notify(); }
     }
 
     public ObservableCollection<DuplicateGroupViewModel> Groups { get; } = [];
+    public ObservableCollection<StagingEntryViewModel> StagedItems { get; } = [];
+
+    public bool HasStagedItems => StagedItems.Count > 0;
+    public Visibility StagingPanelVisibility => StagedItems.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    public string StagedCountText => $"Review Staged Changes ({StagedItems.Count})";
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    // ── Construction ──────────────────────────────────────────────────────
+    // ── Construction ──────────────────────────────────────────────────────────
 
     public MainViewModel()
     {
@@ -51,26 +59,44 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var dbPath = Path.Combine(appData, "cache.db");
         _connectionString = $"Data Source={dbPath}";
         DbInitializer.Initialize(_connectionString);
+        _stagingRepo = new OrganizationStagingRepository(_connectionString);
     }
 
-    // ── Scan ──────────────────────────────────────────────────────────────
+    // ── Scan ─────────────────────────────────────────────────────────────────
 
     public async Task ScanFolderAsync(string folderPath)
     {
         IsIdle = false;
         Groups.Clear();
+        StagedItems.Clear();
+        _stagingRepo.ClearStaged();
         StatusText = "Scanning…";
 
         try
         {
-            var scanned = await Task.Run(() => ScanFiles(folderPath));
+            var scanned  = await Task.Run(() => ScanFiles(folderPath));
+            var pathToId = scanned.ToDictionary(r => r.FilePath, r => r.Id, StringComparer.OrdinalIgnoreCase);
 
             var imageRecords = scanned.Select(ToImageRecord);
-            var dupGroups = SuggestionEngine.GroupDuplicates(imageRecords);
+            var dupGroups    = SuggestionEngine.GroupDuplicates(imageRecords);
 
             foreach (var g in dupGroups)
-                Groups.Add(new DuplicateGroupViewModel(g));
+            {
+                var vm = new DuplicateGroupViewModel(g, pathToId);
+                foreach (var fa in vm.FileActions)
+                {
+                    fa.ActionChanged = OnFileActionChanged;
+                    if (!fa.IsSuggested)
+                    {
+                        var sid = _stagingRepo.StageAction(fa.FileRecordId, "Delete", null, "Duplicate detected");
+                        fa.StagingId = sid;
+                        StagedItems.Add(new StagingEntryViewModel(sid, fa.FilePath, "Delete"));
+                    }
+                }
+                Groups.Add(vm);
+            }
 
+            NotifyStagingPanel();
             StatusText = scanned.Count == 0
                 ? "No image files found in that folder."
                 : $"{scanned.Count} file(s) scanned — {dupGroups.Count} duplicate group(s) found.";
@@ -85,11 +111,93 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    // ── Private helpers ───────────────────────────────────────────────────
+    // ── Staging callbacks ─────────────────────────────────────────────────────
+
+    private void OnFileActionChanged(FileActionViewModel fa)
+    {
+        // Remove old staging row
+        if (fa.StagingId.HasValue)
+        {
+            _stagingRepo.RemoveStagingEntry(fa.StagingId.Value);
+            var old = StagedItems.FirstOrDefault(s => s.StagingId == fa.StagingId.Value);
+            if (old is not null) StagedItems.Remove(old);
+            fa.StagingId = null;
+        }
+
+        // Create new staging row if user picked something actionable
+        if (fa.SelectedAction != "None")
+        {
+            var sid = _stagingRepo.StageAction(fa.FileRecordId, fa.SelectedAction, null, "User staged");
+            fa.StagingId = sid;
+            StagedItems.Add(new StagingEntryViewModel(sid, fa.FilePath, fa.SelectedAction));
+        }
+
+        NotifyStagingPanel();
+    }
+
+    /// <summary>Remove a staging entry from both the DB and the panel (e.g. user clicks "Remove").</summary>
+    public void RemoveStagingEntry(int stagingId)
+    {
+        _stagingRepo.RemoveStagingEntry(stagingId);
+
+        var panelEntry = StagedItems.FirstOrDefault(s => s.StagingId == stagingId);
+        if (panelEntry is not null) StagedItems.Remove(panelEntry);
+
+        // Reset the corresponding FileActionViewModel so the ComboBox shows "None"
+        var fa = Groups.SelectMany(g => g.FileActions)
+                       .FirstOrDefault(f => f.StagingId == stagingId);
+        fa?.ResetToNone();
+
+        NotifyStagingPanel();
+    }
+
+    // ── Commit ────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Sync Move target paths from the UI into the DB, then run CommitService.
+    /// Returns the result so the caller can show a summary dialog.
+    /// </summary>
+    public async Task<CommitResult> CommitStagedChangesAsync()
+    {
+        IsIdle = false;
+        StatusText = "Committing changes…";
+        try
+        {
+            // Flush Move target paths from TextBoxes into staging rows
+            foreach (var fa in Groups.SelectMany(g => g.FileActions))
+            {
+                if (fa.SelectedAction == "Move" && fa.StagingId.HasValue)
+                    _stagingRepo.UpdateTargetPath(fa.StagingId.Value, fa.TargetPath);
+            }
+
+            var result = await Task.Run(() =>
+                new CommitService(_connectionString, RecycleBinDelete).ExecutePendingActions());
+
+            // Clear UI state — files are gone/moved
+            Groups.Clear();
+            StagedItems.Clear();
+            NotifyStagingPanel();
+            StatusText = result.Failed == 0
+                ? $"Done — {result.Succeeded} file(s) processed."
+                : $"Done — {result.Succeeded} succeeded, {result.Failed} failed.";
+            return result;
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Commit failed: {ex.Message}";
+            return new CommitResult();
+        }
+        finally
+        {
+            IsIdle = true;
+        }
+    }
+
+    // ── Private helpers ───────────────────────────────────────────────────────
 
     private List<FileRecord> ScanFiles(string folderPath)
     {
-        var repo = new FileCacheRepository(_connectionString);
+        var repo    = new FileCacheRepository(_connectionString);
         var results = new List<FileRecord>();
 
         var files = Directory
@@ -102,7 +210,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             try
             {
-                var fi = new FileInfo(path);
+                var fi           = new FileInfo(path);
                 var lastModified = fi.LastWriteTimeUtc;
 
                 if (!repo.NeedsRescan(path, fi.Length, lastModified))
@@ -111,7 +219,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     if (cached is not null) { results.Add(cached); continue; }
                 }
 
-                // ── fresh scan ───────────────────────────────────────────
                 var fileHash = ComputeSha256(path);
                 var meta     = ExifReader.ReadMetadata(path);
 
@@ -122,7 +229,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     perceptualHash = DHasher.ComputeFromFile(path);
                     blurScore      = BlurDetector.ComputeBlurScore(path);
                 }
-                catch { /* non-image or corrupt — skip perceptual fields */ }
+                catch { /* corrupt or unsupported image */ }
 
                 var record = new FileRecord
                 {
@@ -144,7 +251,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 repo.Upsert(record);
                 results.Add(record);
             }
-            catch { /* permission error or I/O failure — skip file */ }
+            catch { /* permission error or I/O failure */ }
         }
 
         return results;
@@ -152,7 +259,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private static string ComputeSha256(string path)
     {
-        using var sha = SHA256.Create();
+        using var sha    = SHA256.Create();
         using var stream = File.OpenRead(path);
         return Convert.ToHexString(sha.ComputeHash(stream));
     }
@@ -169,6 +276,19 @@ public sealed class MainViewModel : INotifyPropertyChanged
         BlurScore      = r.BlurScore,
     };
 
-    private void OnPropertyChanged([CallerMemberName] string? name = null) =>
+    private static void RecycleBinDelete(string path) =>
+        Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(
+            path,
+            Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+            Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+
+    private void NotifyStagingPanel()
+    {
+        Notify(nameof(HasStagedItems));
+        Notify(nameof(StagingPanelVisibility));
+        Notify(nameof(StagedCountText));
+    }
+
+    private void Notify([CallerMemberName] string? name = null) =>
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }

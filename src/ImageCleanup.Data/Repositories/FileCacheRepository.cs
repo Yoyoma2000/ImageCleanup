@@ -98,6 +98,31 @@ public sealed class FileCacheRepository
         return cachedSize != fileSize || cachedModified != lastModified;
     }
 
+    public FileRecord? GetById(int id)
+    {
+        using var connection = Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT Id, FilePath, FileHash, PerceptualHash, FileSize, LastModified,
+                   Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot
+            FROM FileRecords
+            WHERE Id = $id
+            """;
+        cmd.Parameters.AddWithValue("$id", id);
+
+        using var reader = cmd.ExecuteReader();
+        return reader.Read() ? MapRow(reader) : null;
+    }
+
+    public void DeleteByPath(string path)
+    {
+        using var connection = Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "DELETE FROM FileRecords WHERE FilePath = $path";
+        cmd.Parameters.AddWithValue("$path", path);
+        cmd.ExecuteNonQuery();
+    }
+
     public IEnumerable<FileRecord> GetAllRecords()
     {
         using var connection = Open();
