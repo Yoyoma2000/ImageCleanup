@@ -224,10 +224,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
                 ulong? perceptualHash = null;
                 double? blurScore    = null;
+                bool?   isLowDetail  = null;
                 try
                 {
                     perceptualHash = DHasher.ComputeFromFile(path);
                     blurScore      = BlurDetector.ComputeBlurScore(path);
+                    isLowDetail    = LowDetailDetector.IsLowDetail(path);
                 }
                 catch { /* corrupt or unsupported image */ }
 
@@ -246,6 +248,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     IsScreenshot   = meta.Width.HasValue && meta.Height.HasValue
                         ? ScreenshotHeuristic.IsLikelyScreenshot(meta, meta.Width.Value, meta.Height.Value)
                         : null,
+                    LowDetail      = isLowDetail,
                 };
 
                 repo.Upsert(record);
@@ -274,6 +277,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Width          = r.Width,
         Height         = r.Height,
         BlurScore      = r.BlurScore,
+        LowDetail      = r.LowDetail,
     };
 
     private static void RecycleBinDelete(string path) =>

@@ -14,4 +14,10 @@ public sealed class ImageRecord
     public int? Width { get; init; }
     public int? Height { get; init; }
     public double? BlurScore { get; init; }
+    /// <summary>
+    /// True when pixel-value variance is below the low-detail threshold.
+    /// Low-detail images are excluded from perceptual near-dup grouping to
+    /// prevent false positives from solid-colour / near-blank images.
+    /// </summary>
+    public bool? LowDetail { get; init; }
 }

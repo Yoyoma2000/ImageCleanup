@@ -18,7 +18,7 @@ public sealed class FileCacheRepository
         using var cmd = connection.CreateCommand();
         cmd.CommandText = """
             SELECT Id, FilePath, FileHash, PerceptualHash, FileSize, LastModified,
-                   Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot
+                   Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot, LowDetail
             FROM FileRecords
             WHERE FilePath = $path
             """;
@@ -35,10 +35,10 @@ public sealed class FileCacheRepository
         cmd.CommandText = """
             INSERT INTO FileRecords
                 (FilePath, FileHash, PerceptualHash, FileSize, LastModified,
-                 Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot)
+                 Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot, LowDetail)
             VALUES
                 ($filePath, $fileHash, $perceptualHash, $fileSize, $lastModified,
-                 $width, $height, $blurScore, $dateTaken, $cameraModel, $isScreenshot)
+                 $width, $height, $blurScore, $dateTaken, $cameraModel, $isScreenshot, $lowDetail)
             ON CONFLICT(FilePath) DO UPDATE SET
                 FileHash       = excluded.FileHash,
                 PerceptualHash = excluded.PerceptualHash,
@@ -49,26 +49,34 @@ public sealed class FileCacheRepository
                 BlurScore      = excluded.BlurScore,
                 DateTaken      = excluded.DateTaken,
                 CameraModel    = excluded.CameraModel,
-                IsScreenshot   = excluded.IsScreenshot
+                IsScreenshot   = excluded.IsScreenshot,
+                LowDetail      = excluded.LowDetail
             RETURNING Id
             """;
 
         cmd.Parameters.AddWithValue("$filePath", record.FilePath);
         cmd.Parameters.AddWithValue("$fileHash", record.FileHash);
         cmd.Parameters.AddWithValue("$perceptualHash", record.PerceptualHash.HasValue
-            ? (object)(long)record.PerceptualHash.Value   // store ulong as signed long
+            ? (object)(long)record.PerceptualHash.Value
             : DBNull.Value);
         cmd.Parameters.AddWithValue("$fileSize", record.FileSize);
         cmd.Parameters.AddWithValue("$lastModified", record.LastModified.ToString("O"));
-        cmd.Parameters.AddWithValue("$width", record.Width.HasValue ? (object)record.Width.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("$height", record.Height.HasValue ? (object)record.Height.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("$blurScore", record.BlurScore.HasValue ? (object)record.BlurScore.Value : DBNull.Value);
+        cmd.Parameters.AddWithValue("$width",
+            record.Width.HasValue ? (object)record.Width.Value : DBNull.Value);
+        cmd.Parameters.AddWithValue("$height",
+            record.Height.HasValue ? (object)record.Height.Value : DBNull.Value);
+        cmd.Parameters.AddWithValue("$blurScore",
+            record.BlurScore.HasValue ? (object)record.BlurScore.Value : DBNull.Value);
         cmd.Parameters.AddWithValue("$dateTaken", record.DateTaken.HasValue
             ? (object)record.DateTaken.Value.ToString("O")
             : DBNull.Value);
-        cmd.Parameters.AddWithValue("$cameraModel", record.CameraModel ?? (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("$cameraModel",
+            record.CameraModel ?? (object)DBNull.Value);
         cmd.Parameters.AddWithValue("$isScreenshot", record.IsScreenshot.HasValue
             ? (object)(record.IsScreenshot.Value ? 1 : 0)
+            : DBNull.Value);
+        cmd.Parameters.AddWithValue("$lowDetail", record.LowDetail.HasValue
+            ? (object)(record.LowDetail.Value ? 1 : 0)
             : DBNull.Value);
 
         var id = cmd.ExecuteScalar();
@@ -89,9 +97,9 @@ public sealed class FileCacheRepository
 
         using var reader = cmd.ExecuteReader();
         if (!reader.Read())
-            return true;  // no cached row
+            return true;
 
-        var cachedSize = reader.GetInt64(0);
+        var cachedSize     = reader.GetInt64(0);
         var cachedModified = DateTime.Parse(
             reader.GetString(1), null,
             System.Globalization.DateTimeStyles.RoundtripKind);
@@ -104,7 +112,7 @@ public sealed class FileCacheRepository
         using var cmd = connection.CreateCommand();
         cmd.CommandText = """
             SELECT Id, FilePath, FileHash, PerceptualHash, FileSize, LastModified,
-                   Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot
+                   Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot, LowDetail
             FROM FileRecords
             WHERE Id = $id
             """;
@@ -129,7 +137,7 @@ public sealed class FileCacheRepository
         using var cmd = connection.CreateCommand();
         cmd.CommandText = """
             SELECT Id, FilePath, FileHash, PerceptualHash, FileSize, LastModified,
-                   Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot
+                   Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot, LowDetail
             FROM FileRecords
             """;
 
@@ -156,12 +164,15 @@ public sealed class FileCacheRepository
         FileHash       = r.GetString(2),
         PerceptualHash = r.IsDBNull(3) ? null : (ulong)r.GetInt64(3),
         FileSize       = r.GetInt64(4),
-        LastModified   = DateTime.Parse(r.GetString(5), null, System.Globalization.DateTimeStyles.RoundtripKind),
-        Width          = r.IsDBNull(6) ? null : r.GetInt32(6),
-        Height         = r.IsDBNull(7) ? null : r.GetInt32(7),
-        BlurScore      = r.IsDBNull(8) ? null : r.GetDouble(8),
-        DateTaken      = r.IsDBNull(9) ? null : DateTime.Parse(r.GetString(9), null, System.Globalization.DateTimeStyles.RoundtripKind),
+        LastModified   = DateTime.Parse(r.GetString(5), null,
+                             System.Globalization.DateTimeStyles.RoundtripKind),
+        Width          = r.IsDBNull(6)  ? null : r.GetInt32(6),
+        Height         = r.IsDBNull(7)  ? null : r.GetInt32(7),
+        BlurScore      = r.IsDBNull(8)  ? null : r.GetDouble(8),
+        DateTaken      = r.IsDBNull(9)  ? null : DateTime.Parse(r.GetString(9), null,
+                             System.Globalization.DateTimeStyles.RoundtripKind),
         CameraModel    = r.IsDBNull(10) ? null : r.GetString(10),
         IsScreenshot   = r.IsDBNull(11) ? null : r.GetInt32(11) != 0,
+        LowDetail      = r.IsDBNull(12) ? null : r.GetInt32(12) != 0,
     };
 }

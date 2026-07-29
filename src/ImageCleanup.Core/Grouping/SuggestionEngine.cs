@@ -42,8 +42,14 @@ public static class SuggestionEngine
         }
 
         // ── Phase 2: near-duplicates by perceptual hash ───────────────────
+        // Low-detail images (near-uniform colour) are excluded: their DHash
+        // values collapse to near-zero regardless of actual content, producing
+        // false-positive near-dup groups. Exact-hash grouping above still
+        // catches them if they are truly identical byte-for-byte.
         var pool = list
-            .Where(r => !assignedPaths.Contains(r.FilePath) && r.PerceptualHash.HasValue)
+            .Where(r => !assignedPaths.Contains(r.FilePath)
+                     && r.PerceptualHash.HasValue
+                     && r.LowDetail != true)
             .ToList();
 
         if (pool.Count < 2)

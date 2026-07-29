@@ -219,6 +219,80 @@ public sealed class SuggestionEngineTests
         Assert.Single(groups, g => !g.IsExactMatch && g.Files.All(f => f.FilePath is "/c.jpg" or "/d.jpg"));
     }
 
+    // ── LowDetail exclusion from near-dup phase ───────────────────────────
+
+    [Fact]
+    public void LowDetail_NearBlankImages_NotGroupedAsNearDups()
+    {
+        // Two near-blank images whose DHash values happen to be within threshold
+        // must NOT form a near-dup group
+        var records = new[]
+        {
+            Rec("/blank1.jpg", hash: "H1", phash: 0UL, lowDetail: true),
+            Rec("/blank2.jpg", hash: "H2", phash: 1UL, lowDetail: true),  // Hamming dist 1
+        };
+
+        Assert.Empty(SuggestionEngine.GroupDuplicates(records, hammingThreshold: 5));
+    }
+
+    [Fact]
+    public void LowDetail_NormalImages_StillGroupedByPerceptualHash()
+    {
+        var records = new[]
+        {
+            Rec("/photo1.jpg", hash: "H1", phash: 0UL, lowDetail: false),
+            Rec("/photo2.jpg", hash: "H2", phash: 1UL, lowDetail: false),  // dist 1
+        };
+
+        Assert.Single(SuggestionEngine.GroupDuplicates(records, hammingThreshold: 5));
+    }
+
+    [Fact]
+    public void LowDetail_MixedImages_OnlyNormalOnesGrouped()
+    {
+        // /photo1 and /photo2 are near-dups; /blank is low-detail and near-zero hash
+        var records = new[]
+        {
+            Rec("/photo1.jpg", hash: "H1", phash: 0UL, lowDetail: false),
+            Rec("/photo2.jpg", hash: "H2", phash: 1UL, lowDetail: false),
+            Rec("/blank.jpg",  hash: "H3", phash: 0UL, lowDetail: true),   // would match /photo1 by dist
+        };
+
+        var groups = SuggestionEngine.GroupDuplicates(records, hammingThreshold: 5);
+
+        var g = Assert.Single(groups);
+        Assert.Equal(2, g.Files.Count);
+        Assert.All(g.Files, f => Assert.NotEqual("/blank.jpg", f.FilePath));
+    }
+
+    [Fact]
+    public void LowDetail_NullLowDetail_TreatedAsNormalImage()
+    {
+        // null LowDetail means "not computed" — should not exclude from near-dup phase
+        var records = new[]
+        {
+            Rec("/a.jpg", hash: "H1", phash: 0UL, lowDetail: null),
+            Rec("/b.jpg", hash: "H2", phash: 1UL, lowDetail: null),
+        };
+
+        Assert.Single(SuggestionEngine.GroupDuplicates(records, hammingThreshold: 5));
+    }
+
+    [Fact]
+    public void LowDetail_ExactDuplicates_StillCaughtByExactHashPhase()
+    {
+        // Low-detail images that are identical byte-for-byte must still group
+        var records = new[]
+        {
+            Rec("/blank1.jpg", hash: "H1", phash: 0UL, lowDetail: true),
+            Rec("/blank2.jpg", hash: "H1", phash: 0UL, lowDetail: true),
+        };
+
+        var g = Assert.Single(SuggestionEngine.GroupDuplicates(records));
+        Assert.True(g.IsExactMatch);
+        Assert.Equal(2, g.Files.Count);
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────
 
     private static ImageRecord Rec(
@@ -228,7 +302,8 @@ public sealed class SuggestionEngineTests
         int?   width           = null,
         int?   height          = null,
         double? blur           = null,
-        DateTime? lastModified = null) => new()
+        DateTime? lastModified = null,
+        bool? lowDetail        = null) => new()
     {
         FilePath       = path,
         FileHash       = hash,
@@ -237,5 +312,6 @@ public sealed class SuggestionEngineTests
         Height         = height,
         BlurScore      = blur,
         LastModified   = lastModified ?? DateTime.UtcNow,
+        LowDetail      = lowDetail,
     };
 }

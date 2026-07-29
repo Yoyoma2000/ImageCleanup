@@ -4,7 +4,8 @@ namespace ImageCleanup.Data;
 
 /// <summary>
 /// Creates the SQLite schema on first startup. Safe to call every startup —
-/// all DDL statements use IF NOT EXISTS guards.
+/// all DDL statements use IF NOT EXISTS guards, and column additions are
+/// idempotent (duplicate-column errors are swallowed).
 /// </summary>
 public static class DbInitializer
 {
@@ -27,7 +28,8 @@ public static class DbInitializer
                 BlurScore     REAL,
                 DateTaken     TEXT,
                 CameraModel   TEXT,
-                IsScreenshot  INTEGER
+                IsScreenshot  INTEGER,
+                LowDetail     INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS OrganizationStaging (
@@ -40,5 +42,16 @@ public static class DbInitializer
             );
             """;
         cmd.ExecuteNonQuery();
+
+        // Safe upgrade for databases created before LowDetail was added.
+        // ALTER TABLE ADD COLUMN throws "duplicate column name" if already present;
+        // we treat that as a no-op.
+        try
+        {
+            using var alter = connection.CreateCommand();
+            alter.CommandText = "ALTER TABLE FileRecords ADD COLUMN LowDetail INTEGER";
+            alter.ExecuteNonQuery();
+        }
+        catch (SqliteException) { /* column already exists — ok */ }
     }
 }

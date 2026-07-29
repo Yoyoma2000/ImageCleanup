@@ -14,4 +14,5 @@ public sealed class FileRecord
     public DateTime? DateTaken { get; set; }
     public string? CameraModel { get; set; }
     public bool? IsScreenshot { get; set; }
+    public bool? LowDetail { get; set; }
 }
