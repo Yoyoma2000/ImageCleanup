@@ -1,6 +1,7 @@
 using ImageCleanup.Data.Models;
 using ImageCleanup.Data.Repositories;
 using ImageCleanup.Data.Tests.Helpers;
+using Microsoft.Data.Sqlite;
 
 namespace ImageCleanup.Data.Tests;
 
@@ -119,6 +120,56 @@ public sealed class FileCacheRepositoryTests : IDisposable
         Assert.True(Repo.NeedsRescan("/photos/modified.jpg", 5000, modified.AddSeconds(1)));
     }
 
+    // ── SchemaVersion / NeedsRescan ──────────────────────────────────────
+
+    [Fact]
+    public void Upsert_SetsCurrentSchemaVersion()
+    {
+        var record = MakeSampleRecord("/photos/versioned.jpg");
+        Repo.Upsert(record);
+
+        var fetched = Repo.GetByPath("/photos/versioned.jpg");
+        Assert.NotNull(fetched);
+        Assert.Equal(FileCacheRepository.CurrentSchemaVersion, fetched.SchemaVersion);
+    }
+
+    [Fact]
+    public void NeedsRescan_OldSchemaVersion_ReturnsTrueEvenWhenSizeAndDateUnchanged()
+    {
+        var modified = new DateTime(2024, 6, 1, 12, 0, 0, DateTimeKind.Utc);
+        var record   = MakeSampleRecord("/photos/stale.jpg", fileSize: 8192, lastModified: modified);
+        Repo.Upsert(record);
+
+        // Simulate a record written by an older version of the app
+        BackdateSchemaVersion("/photos/stale.jpg", version: 0);
+
+        // File on disk is unchanged — but the cached schema is old
+        Assert.True(Repo.NeedsRescan("/photos/stale.jpg", 8192, modified));
+    }
+
+    [Fact]
+    public void NeedsRescan_CurrentSchemaVersion_UnchangedFile_ReturnsFalse()
+    {
+        var modified = new DateTime(2024, 6, 1, 12, 0, 0, DateTimeKind.Utc);
+        var record   = MakeSampleRecord("/photos/fresh.jpg", fileSize: 8192, lastModified: modified);
+        Repo.Upsert(record);
+
+        // Schema is current and file stats match — no rescan needed
+        Assert.False(Repo.NeedsRescan("/photos/fresh.jpg", 8192, modified));
+    }
+
+    [Fact]
+    public void NeedsRescan_OldSchemaVersion_SizeAlsoChanged_StillReturnsTrue()
+    {
+        var modified = new DateTime(2024, 6, 1, 12, 0, 0, DateTimeKind.Utc);
+        var record   = MakeSampleRecord("/photos/double.jpg", fileSize: 8192, lastModified: modified);
+        Repo.Upsert(record);
+        BackdateSchemaVersion("/photos/double.jpg", version: 0);
+
+        // Both old schema AND changed size — should still be true
+        Assert.True(Repo.NeedsRescan("/photos/double.jpg", 9999, modified));
+    }
+
     // ── GetAllRecords ────────────────────────────────────────────────────
 
     [Fact]
@@ -136,6 +187,21 @@ public sealed class FileCacheRepositoryTests : IDisposable
     }
 
     // ── helpers ──────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Directly sets SchemaVersion in the DB to simulate a record written by
+    /// an older version of the app, without going through the repository.
+    /// </summary>
+    private void BackdateSchemaVersion(string filePath, int version)
+    {
+        using var conn = new SqliteConnection(_db.ConnectionString);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "UPDATE FileRecords SET SchemaVersion = $v WHERE FilePath = $p";
+        cmd.Parameters.AddWithValue("$v", version);
+        cmd.Parameters.AddWithValue("$p", filePath);
+        cmd.ExecuteNonQuery();
+    }
 
     private static FileRecord MakeSampleRecord(
         string path,

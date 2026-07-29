@@ -3,9 +3,9 @@ using Microsoft.Data.Sqlite;
 namespace ImageCleanup.Data;
 
 /// <summary>
-/// Creates the SQLite schema on first startup. Safe to call every startup —
-/// all DDL statements use IF NOT EXISTS guards, and column additions are
-/// idempotent (duplicate-column errors are swallowed).
+/// Creates and upgrades the SQLite schema. Safe to call on every startup —
+/// all DDL uses IF NOT EXISTS, and ADD COLUMN migrations are idempotent
+/// (duplicate-column exceptions are silently swallowed).
 /// </summary>
 public static class DbInitializer
 {
@@ -17,19 +17,20 @@ public static class DbInitializer
         using var cmd = connection.CreateCommand();
         cmd.CommandText = """
             CREATE TABLE IF NOT EXISTS FileRecords (
-                Id            INTEGER PRIMARY KEY,
-                FilePath      TEXT    UNIQUE NOT NULL,
-                FileHash      TEXT    NOT NULL,
+                Id             INTEGER PRIMARY KEY,
+                FilePath       TEXT    UNIQUE NOT NULL,
+                FileHash       TEXT    NOT NULL,
                 PerceptualHash INTEGER,
-                FileSize      INTEGER NOT NULL,
-                LastModified  TEXT    NOT NULL,
-                Width         INTEGER,
-                Height        INTEGER,
-                BlurScore     REAL,
-                DateTaken     TEXT,
-                CameraModel   TEXT,
-                IsScreenshot  INTEGER,
-                LowDetail     INTEGER
+                FileSize       INTEGER NOT NULL,
+                LastModified   TEXT    NOT NULL,
+                Width          INTEGER,
+                Height         INTEGER,
+                BlurScore      REAL,
+                DateTaken      TEXT,
+                CameraModel    TEXT,
+                IsScreenshot   INTEGER,
+                LowDetail      INTEGER,
+                SchemaVersion  INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS OrganizationStaging (
@@ -43,15 +44,20 @@ public static class DbInitializer
             """;
         cmd.ExecuteNonQuery();
 
-        // Safe upgrade for databases created before LowDetail was added.
-        // ALTER TABLE ADD COLUMN throws "duplicate column name" if already present;
-        // we treat that as a no-op.
+        // ── Column-level upgrades for pre-existing databases ─────────────────
+        // Each ALTER TABLE ADD COLUMN is a no-op if the column already exists.
+        AddColumnIfMissing(connection, "ALTER TABLE FileRecords ADD COLUMN LowDetail INTEGER");
+        AddColumnIfMissing(connection, "ALTER TABLE FileRecords ADD COLUMN SchemaVersion INTEGER NOT NULL DEFAULT 0");
+    }
+
+    private static void AddColumnIfMissing(SqliteConnection connection, string alterSql)
+    {
         try
         {
-            using var alter = connection.CreateCommand();
-            alter.CommandText = "ALTER TABLE FileRecords ADD COLUMN LowDetail INTEGER";
-            alter.ExecuteNonQuery();
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = alterSql;
+            cmd.ExecuteNonQuery();
         }
-        catch (SqliteException) { /* column already exists — ok */ }
+        catch (SqliteException) { /* duplicate column name — already present */ }
     }
 }

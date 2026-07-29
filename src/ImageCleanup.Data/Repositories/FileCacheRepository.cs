@@ -5,6 +5,19 @@ namespace ImageCleanup.Data.Repositories;
 
 public sealed class FileCacheRepository
 {
+    /// <summary>
+    /// Increment this constant whenever a new computed field is added to
+    /// <see cref="FileRecord"/> that requires re-analysis of the image file.
+    /// <c>NeedsRescan</c> returns <c>true</c> for any cached row whose stored
+    /// <c>SchemaVersion</c> is less than this value, forcing a fresh scan even
+    /// when <c>FileSize</c> and <c>LastModified</c> are unchanged.
+    ///
+    /// Version history:
+    ///   0 — initial schema (no SchemaVersion column)
+    ///   1 — added LowDetail (pixel-variance flag)
+    /// </summary>
+    public const int CurrentSchemaVersion = 1;
+
     private readonly string _connectionString;
 
     public FileCacheRepository(string connectionString)
@@ -18,7 +31,8 @@ public sealed class FileCacheRepository
         using var cmd = connection.CreateCommand();
         cmd.CommandText = """
             SELECT Id, FilePath, FileHash, PerceptualHash, FileSize, LastModified,
-                   Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot, LowDetail
+                   Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot,
+                   LowDetail, SchemaVersion
             FROM FileRecords
             WHERE FilePath = $path
             """;
@@ -35,10 +49,12 @@ public sealed class FileCacheRepository
         cmd.CommandText = """
             INSERT INTO FileRecords
                 (FilePath, FileHash, PerceptualHash, FileSize, LastModified,
-                 Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot, LowDetail)
+                 Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot,
+                 LowDetail, SchemaVersion)
             VALUES
                 ($filePath, $fileHash, $perceptualHash, $fileSize, $lastModified,
-                 $width, $height, $blurScore, $dateTaken, $cameraModel, $isScreenshot, $lowDetail)
+                 $width, $height, $blurScore, $dateTaken, $cameraModel, $isScreenshot,
+                 $lowDetail, $schemaVersion)
             ON CONFLICT(FilePath) DO UPDATE SET
                 FileHash       = excluded.FileHash,
                 PerceptualHash = excluded.PerceptualHash,
@@ -50,7 +66,8 @@ public sealed class FileCacheRepository
                 DateTaken      = excluded.DateTaken,
                 CameraModel    = excluded.CameraModel,
                 IsScreenshot   = excluded.IsScreenshot,
-                LowDetail      = excluded.LowDetail
+                LowDetail      = excluded.LowDetail,
+                SchemaVersion  = excluded.SchemaVersion
             RETURNING Id
             """;
 
@@ -78,18 +95,28 @@ public sealed class FileCacheRepository
         cmd.Parameters.AddWithValue("$lowDetail", record.LowDetail.HasValue
             ? (object)(record.LowDetail.Value ? 1 : 0)
             : DBNull.Value);
+        cmd.Parameters.AddWithValue("$schemaVersion", CurrentSchemaVersion);
 
         var id = cmd.ExecuteScalar();
         if (id is long lid)
             record.Id = (int)lid;
     }
 
+    /// <summary>
+    /// Returns <c>true</c> when the file must be re-hashed and re-analysed:
+    /// <list type="bullet">
+    ///   <item>No cached row exists for <paramref name="path"/>.</item>
+    ///   <item>The cached <c>FileSize</c> or <c>LastModified</c> differs.</item>
+    ///   <item>The cached <c>SchemaVersion</c> is older than
+    ///         <see cref="CurrentSchemaVersion"/> (new computed fields were added).</item>
+    /// </list>
+    /// </summary>
     public bool NeedsRescan(string path, long fileSize, DateTime lastModified)
     {
         using var connection = Open();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = """
-            SELECT FileSize, LastModified
+            SELECT FileSize, LastModified, SchemaVersion
             FROM FileRecords
             WHERE FilePath = $path
             """;
@@ -103,7 +130,11 @@ public sealed class FileCacheRepository
         var cachedModified = DateTime.Parse(
             reader.GetString(1), null,
             System.Globalization.DateTimeStyles.RoundtripKind);
-        return cachedSize != fileSize || cachedModified != lastModified;
+        var cachedVersion  = reader.IsDBNull(2) ? 0 : reader.GetInt32(2);
+
+        return cachedSize    != fileSize
+            || cachedModified != lastModified
+            || cachedVersion   < CurrentSchemaVersion;
     }
 
     public FileRecord? GetById(int id)
@@ -112,7 +143,8 @@ public sealed class FileCacheRepository
         using var cmd = connection.CreateCommand();
         cmd.CommandText = """
             SELECT Id, FilePath, FileHash, PerceptualHash, FileSize, LastModified,
-                   Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot, LowDetail
+                   Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot,
+                   LowDetail, SchemaVersion
             FROM FileRecords
             WHERE Id = $id
             """;
@@ -137,7 +169,8 @@ public sealed class FileCacheRepository
         using var cmd = connection.CreateCommand();
         cmd.CommandText = """
             SELECT Id, FilePath, FileHash, PerceptualHash, FileSize, LastModified,
-                   Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot, LowDetail
+                   Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot,
+                   LowDetail, SchemaVersion
             FROM FileRecords
             """;
 
@@ -162,7 +195,7 @@ public sealed class FileCacheRepository
         Id             = r.GetInt32(0),
         FilePath       = r.GetString(1),
         FileHash       = r.GetString(2),
-        PerceptualHash = r.IsDBNull(3) ? null : (ulong)r.GetInt64(3),
+        PerceptualHash = r.IsDBNull(3)  ? null : (ulong)r.GetInt64(3),
         FileSize       = r.GetInt64(4),
         LastModified   = DateTime.Parse(r.GetString(5), null,
                              System.Globalization.DateTimeStyles.RoundtripKind),
@@ -174,5 +207,6 @@ public sealed class FileCacheRepository
         CameraModel    = r.IsDBNull(10) ? null : r.GetString(10),
         IsScreenshot   = r.IsDBNull(11) ? null : r.GetInt32(11) != 0,
         LowDetail      = r.IsDBNull(12) ? null : r.GetInt32(12) != 0,
+        SchemaVersion  = r.IsDBNull(13) ? 0    : r.GetInt32(13),
     };
 }

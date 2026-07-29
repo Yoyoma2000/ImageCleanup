@@ -15,4 +15,5 @@ public sealed class FileRecord
     public string? CameraModel { get; set; }
     public bool? IsScreenshot { get; set; }
     public bool? LowDetail { get; set; }
+    public int SchemaVersion { get; set; }
 }
