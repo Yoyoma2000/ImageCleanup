@@ -6,7 +6,7 @@ namespace ImageCleanup.App.ViewModels;
 
 public sealed class FileActionViewModel : INotifyPropertyChanged
 {
-    public static IReadOnlyList<string> AvailableActions { get; } = ["None", "Delete", "Move"];
+    public IReadOnlyList<string> AvailableActions { get; } = ["None", "Delete", "Move"];
 
     public int FileRecordId { get; init; }
     public string FilePath { get; init; } = string.Empty;
