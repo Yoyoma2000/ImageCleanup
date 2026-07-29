@@ -30,9 +30,43 @@ C#/.NET 9, WinUI 3 for UI.
 - Always parse DateTime from SQLite with DateTimeStyles.RoundtripKind.
 
 ## Status
-Sessions 1–5 complete.
-- Core: DHash, BlurDetector, ExifReader, ScreenshotHeuristic, SuggestionEngine
-- Data: FileCacheRepository, OrganizationStagingRepository, CommitService
-- App: FolderPicker scan pipeline, duplicate review UI, per-file action staging,
-  staging panel with commit flow, confirmation + summary dialogs
-- Tests: Core (hash, quality, heuristics, grouping), Data (cache, staging, commit)
+Sessions 1–6 complete. 87 tests passing (59 Core, 28 Data), 0 failures.
+
+### Completed
+- Core: DHash perceptual hash + Hamming distance, BlurDetector (Laplacian
+  variance), ExifReader (MetadataExtractor), ScreenshotHeuristic (aspect-ratio),
+  LowDetailDetector (pixel-variance), SuggestionEngine (exact + near-dup
+  grouping via union-find with LowDetail exclusion)
+- Data: FileCacheRepository (with SchemaVersion-aware NeedsRescan),
+  OrganizationStagingRepository, CommitService (delete via caller-supplied
+  delegate so Microsoft.VisualBasic stays out of the net9.0 Data layer),
+  DbInitializer with idempotent ALTER TABLE column migrations
+- App: FolderPicker scan pipeline, duplicate review UI with per-file
+  Delete/Move/None ComboBoxes, staging review panel with Remove per entry,
+  commit flow with confirmation + summary ContentDialogs, RecycleBin delete
+  wired via delegate in MainViewModel
+- Bug fix: near-blank/solid-colour images collapsed to near-zero DHash values
+  and formed false near-dup groups. LowDetail flag (pixel variance < 50)
+  excludes them from the perceptual-hash phase; exact-hash grouping is
+  unaffected.
+- SchemaVersion on FileRecords: NeedsRescan returns true when the cached row
+  was written by an older schema (currently v0 → v1 for LowDetail), so new
+  computed fields are never silently left null on previously-cached files.
+
+### Known constraints
+- App runs via Visual Studio F5 only — `dotnet build`/`dotnet run` fail with
+  MSB4062 (PRI/MRT packaging task missing from plain .NET SDK).
+- Framework-dependent: requires Windows App Runtime 1.6.x installed on the
+  target machine.
+- WinUI 3 → WPF migration is under consideration given packaging friction;
+  Core and Data have no UI framework dependency and would be unaffected.
+
+### Not yet started
+- Thumbnail/image previews in the duplicate list (currently text-only)
+- IsScreenshot / BlurScore / LowDetail signals shown in UI
+- Recursive folder scanning (currently top-level only)
+- Installer / distribution
+
+### Next planned
+- Thumbnail previews in the duplicate group list so review doesn't rely on
+  filenames alone.
