@@ -1,3 +1,4 @@
+using System.Globalization;
 using ImageCleanup.Core.Grouping;
 using ImageCleanup.Core.Metadata;
 
@@ -37,7 +38,7 @@ public static class OrganizationPlanner
                             .OrderBy(g => g.Key)
                             .Select(categoryGroup =>
                             {
-                                var targetFolder = $"{yearGroup.Key:D4}/{monthGroup.Key:D2}/{categoryGroup.Key}";
+                                var targetFolder = $"{yearGroup.Key:D4}/{FormatMonthFolder(monthGroup.Key)}/{categoryGroup.Key}";
                                 var files = ResolveFileNames(
                                     categoryGroup.Select(x => x.Record),
                                     targetFolder);
@@ -101,6 +102,18 @@ public static class OrganizationPlanner
 
         return result;
     }
+
+    /// <summary>
+    /// Hybrid month folder name for the real, on-disk destination path —
+    /// e.g. "03 - March". Two-digit zero-padded number sorts correctly in
+    /// File Explorer (pure word names sort alphabetically, not
+    /// chronologically); the month name keeps it readable (pure numbers
+    /// aren't). This is distinct from the TreeView preview's word-only
+    /// month label (OrganizationTreeBuilder) — that's an in-app list where
+    /// chronological filesystem sort isn't a concern, so it stays as-is.
+    /// </summary>
+    private static string FormatMonthFolder(int month) =>
+        $"{month:D2} - {new DateTime(1, month, 1).ToString("MMMM", CultureInfo.CurrentCulture)}";
 
     private static string GetParentFolderName(string filePath)
     {

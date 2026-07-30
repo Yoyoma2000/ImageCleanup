@@ -70,12 +70,40 @@ public sealed class FileActionViewModel : INotifyPropertyChanged
             if (_selectedAction == value) return;
             _selectedAction = value;
             Notify();
+            Notify(nameof(SelectedActionIndex));
             Notify(nameof(MoveTargetVisibility));
             Notify(nameof(IsSuggested));
             Notify(nameof(SuggestedBadgeVisibility));
             Notify(nameof(KeepBorderThickness));
             if (!_suppress) ActionChanged?.Invoke(this);
         }
+    }
+
+    /// <summary>
+    /// Index-based mirror of <see cref="SelectedAction"/> for binding to
+    /// ComboBox.SelectedIndex instead of SelectedItem. A virtualizing
+    /// ListView/GridView reusing a container for a different
+    /// FileActionViewModel can leave a SelectedItem-bound ComboBox showing
+    /// blank (WinUI has to re-match the new SelectedAction string against
+    /// its ItemsSource by value on reuse, and that match doesn't always
+    /// re-run reliably) — SelectedIndex is a plain int with nothing to
+    /// match, so it isn't subject to that class of bug.
+    /// </summary>
+    public int SelectedActionIndex
+    {
+        get => IndexOf(AvailableActions, _selectedAction);
+        set
+        {
+            if (value < 0 || value >= AvailableActions.Count) return;
+            SelectedAction = AvailableActions[value];
+        }
+    }
+
+    private static int IndexOf(IReadOnlyList<string> list, string value)
+    {
+        for (var i = 0; i < list.Count; i++)
+            if (list[i] == value) return i;
+        return -1;
     }
 
     private string? _targetPath;
@@ -113,6 +141,7 @@ public sealed class FileActionViewModel : INotifyPropertyChanged
         StagingId       = null;
         _suppress       = false;
         Notify(nameof(SelectedAction));
+        Notify(nameof(SelectedActionIndex));
         Notify(nameof(MoveTargetVisibility));
         Notify(nameof(IsSuggested));
         Notify(nameof(SuggestedBadgeVisibility));

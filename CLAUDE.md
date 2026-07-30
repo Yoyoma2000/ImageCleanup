@@ -75,7 +75,25 @@ C#/.NET 9, WinUI 3 for UI.
 - Always parse DateTime from SQLite with DateTimeStyles.RoundtripKind.
 
 ## Status
-Sessions 1–17 complete. 148 tests passing (101 Core, 47 Data), 0 failures.
+Sessions 1–19 complete. 155 tests passing (101 Core, 54 Data), 0 failures.
+
+**All three core features are feature-complete and manually verified
+end-to-end on real data:**
+- **Duplicates** — recursive scan → exact/near-dup detection
+  (SuggestionEngine) → independent staging (OrganizationStagingRepository)
+  → Recycle Bin commit (CommitService).
+- **Quality** — recursive scan → blurriest-first review (QualityReviewOrder)
+  → independent staging (QualityStagingRepository) → Recycle Bin commit
+  (CommitService).
+- **Organization** — recursive scan → Year/Month/Category planning
+  (OrganizationPlanner) → TreeView preview → real move execution with a
+  pre-execution move log (OrganizationExecutor). v1 is all-or-nothing
+  (whole plan or nothing) with no staging table of its own — see Known
+  gaps below.
+
+All three share the same recursive, hidden/system/reparse-point-aware
+scan (ScanSessionService + Core.IO.ImageFileEnumerator) and the same
+ThumbnailCache-backed preview thumbnails.
 
 ### Completed
 - Core: DHash perceptual hash + Hamming distance, BlurDetector (Laplacian
@@ -402,51 +420,156 @@ Sessions 1–17 complete. 148 tests passing (101 Core, 47 Data), 0 failures.
   DispatcherQueue.GetForCurrentThread() is still called once per node
   including every file node, which is a real if likely-minor per-node
   cost at large scale).
+- Organization move execution (v1: all files, no per-file selection yet —
+  a future enhancement). **This is the first feature in the app that moves
+  files outside Recycle Bin safety** — Delete actions elsewhere
+  (Duplicates/Quality) go through the Recycle Bin via a delegate;
+  Organization's Move is a real, non-reversible-through-Recycle-Bin
+  File.Move, called out explicitly in the confirmation dialog.
+  - Data.Services.OrganizationExecutor (same layer/style as CommitService —
+    plain File.Move, no delegate injection needed since there's no
+    OS-specific "safe move" the way Recycle-Bin-delete needed one).
+    Execute(OrganizationPlan, destinationRoot): computes each file's full
+    target path (destinationRoot + the plan's Year/Month/Category +
+    already-conflict-resolved filename), **writes a durable JSON move log
+    before attempting any move** (so a record survives even if the app
+    crashes mid-batch), then moves each file with a per-file try/catch —
+    one locked/missing/permission-denied file is recorded as a failure and
+    does not abort the rest, same pattern as CommitService. Returns
+    succeeded/failed counts, per-file failure reasons, and the log path.
+  - **Move log**: `%LOCALAPPDATA%\ImageCleanup\move-logs\move-log_
+    yyyyMMdd_HHmmss.json`, one per execution — a JSON object with
+    Timestamp, DestinationRoot, and a Moves array of every planned
+    {SourcePath, DestinationPath} pair (regardless of whether that
+    particular move went on to succeed or fail — the log reflects the
+    plan, not the outcome). **This log is the only safety net for now —
+    there is no automated undo.** A human would need to read the log and
+    manually move files back; that's a known, explicit gap, not an
+    oversight (see Not yet started).
+  - 6 new tests (temp-directory-based, no SQLite needed —
+    OrganizationExecutor doesn't touch the DB at all): successful moves to
+    the computed nested path, destination directories created as needed,
+    one missing-source failure among a batch that still completes the
+    rest, and — the most direct proof of "log written before execution,
+    not after" — a case where *every* move fails yet the log still
+    contains all the planned entries (if the log were only populated as
+    moves succeeded, an all-failures run would produce an empty log; it
+    doesn't).
+  - App layer: OrganizationPage gained a destination folder picker
+    (defaults to the currently-scanned source folder via
+    ScanSessionService.CurrentFolder, but a user's explicit pick via
+    FolderPicker is never clobbered by a later rescan) and an "Organize
+    Files…" button gated on IsIdle + a non-empty plan + a chosen
+    destination. Confirmation dialog states the file count, destination,
+    and explicitly warns this is a real move, not reversible via Recycle
+    Bin, before anything executes; summary dialog after shows succeeded/
+    failed counts and the move log's path. After a successful execution,
+    calls ScanSessionService.RefreshAsync() — same as Duplicates/Quality's
+    commit flows — so every page reflects the new disk state.
+  - Added App.ShellWindow (a static Window reference set in OnLaunched) —
+    OrganizationPage needed its own FolderPicker (for the destination),
+    and a Page has no HWND of its own in an unpackaged app the way
+    MainWindow does; WindowNative.GetWindowHandle needs an actual Window.
+    Named ShellWindow, not MainWindow, since the latter collides with the
+    MainWindow class itself.
+  - Flagged, not fixed (out of scope for v1): files moved by Organization
+    aren't explicitly removed from FileCacheRepository the way
+    CommitService's Move already does for Duplicates/Quality-committed
+    files. RefreshAsync's rescan naturally stops surfacing files moved
+    outside CurrentFolder (correct/expected), but their old FileRecords
+    rows become orphaned in the SQLite cache rather than being cleaned up
+    — harmless today, but worth revisiting alongside the existing
+    thumbnail-cache-eviction gap if the cache noticeably bloats over time.
+- Bug fix: Organization move-execution month folders now use a hybrid
+  "01 - January" naming format (two-digit zero-padded number + " - " +
+  full month name) instead of a plain zero-padded number, so File Explorer
+  sorts them chronologically (pure word names would sort alphabetically)
+  while staying human-readable (pure numbers aren't). This only changes
+  OrganizationPlanner's PlannedFile.TargetFolder computation — the only
+  consumer of that value is OrganizationExecutor, so real on-disk folders
+  are the only thing affected. The TreeView preview's month labels
+  (OrganizationTreeBuilder/OrganizationTreeNode) are a separate, independent
+  computation and were deliberately left as word-only names ("March") —
+  an in-app list has no filesystem chronological-sort concern, so there
+  was no reason to change it. 1 new test confirms the hybrid format
+  directly on real created directories; 5 existing tests (2 in
+  OrganizationPlannerTests, 3 in OrganizationExecutorTests) that asserted
+  the old plain-number folder strings were updated to match, computing the
+  expected month name via CultureInfo.CurrentCulture rather than
+  hardcoding an English name, so they stay correct on non-English machines.
+- Bug fix: QualityPage's action ComboBox occasionally showed blank after
+  deleting a row (removing a file from Quality's list) instead of "None".
+  Root cause: the ComboBox bound via `SelectedItem="{x:Bind SelectedAction,
+  Mode=TwoWay}"`, and QualityPage's ListView virtualizes — when a
+  container is reused for a different FileActionViewModel after the list
+  shrinks, WinUI has to re-match the new item's SelectedAction string
+  against the ComboBox's ItemsSource by value, and that re-match doesn't
+  always reliably re-run on reuse, leaving SelectedIndex at -1 (blank)
+  even though the underlying ViewModel's SelectedAction is correctly set.
+  Fixed by adding FileActionViewModel.SelectedActionIndex (an int mirror of
+  SelectedAction, mapped against AvailableActions) and switching
+  QualityPage's ComboBox to bind `SelectedIndex` instead of `SelectedItem`
+  — a plain int has nothing to re-match against an ItemsSource on
+  container reuse, so it isn't subject to this class of bug.
+  SelectedAction itself (the string every other feature's logic reads) is
+  unchanged; SelectedActionIndex is purely additive. Not fixed elsewhere
+  (DuplicatesPage/GroupDetailDialog still bind via SelectedItem) since
+  only QualityPage was reported affected and those two have different
+  virtualization exposure — SelectedActionIndex is available on the shared
+  FileActionViewModel if the same symptom ever surfaces there. This is
+  WinUI container-recycling behavior, not meaningfully unit-testable (no
+  App-layer test project exists, and the bug is specifically about
+  virtualized-container reuse timing) — verify manually per the checklist
+  below.
 
-### Known constraints
-- App runs via Visual Studio F5 only — `dotnet build`/`dotnet run` fail with
-  MSB4062 (PRI/MRT packaging task missing from plain .NET SDK).
-- Framework-dependent: requires Windows App Runtime 1.6.x installed on the
-  target machine.
-- WinUI 3 → WPF migration is under consideration given packaging friction;
-  Core and Data have no UI framework dependency and would be unaffected.
-
-### Not yet started
-- Organization feature: the TreeView preview (OrganizationPage/
-  OrganizationViewModel) is now in place — nav item, planning engine, real
-  data, and the UI to see it all exist. What's still missing: any way to
-  actually act on the plan. No staging, no commit, no move-execution UI —
-  the page is genuinely look-but-don't-touch. Needs: a staging model
-  decision (reuse OrganizationStagingRepository — it's already named for
-  this feature — or follow Quality's separate-table precedent), a way to
-  approve/edit the plan (e.g. per-file override for a bad conflict
-  resolution or an unwanted category placement), and the actual
-  move-execution flow (reusing CommitService's IStagingRepository
-  generalization the same way Quality does, presumably, but Organization's
-  "action" is Move — to a computed path — rather than Delete/Move-to-
-  user-chosen-path, so CommitService's Move branch may need to accept a
-  planned/computed target rather than only a user-typed TargetPath).
-- MetadataCategory (Photo/NoMetadata) is now consumed end-to-end from real
-  data all the way through to the UI (OrganizationPlanner <-
-  ImageRecordMapper <- FileRecord, rendered as TreeView category nodes).
-- IsScreenshot / LowDetail signals shown in UI (BlurScore now shown, in
-  Quality)
-- Installer / distribution
-- Thumbnail cache eviction/cleanup (cache directory grows unbounded today)
-- Quality review list has no thumbnail-size detail view equivalent to
-  Duplicates' GroupDetailDialog (not requested yet — Quality's flat list
-  already shows a 64px thumbnail per row)
-
-### Next planned
-- Verify the NavigationView shell, DuplicatesPage restructure, nav icons,
-  and the new Quality feature via Visual Studio F5 (see "Manual
-  verification needed" below) — none of this is CLI-testable at the App
-  layer.
-- Organization move-execution + conflict-handling UI: the preview TreeView
-  is done — next is turning the plan into real staged actions (staging
-  model decision above), a way to review/override individual files before
-  committing (especially conflict-renamed ones), and an actual commit flow
-  that moves files to their computed target paths.
+### Known gaps / not yet started
+- **Video duplicate/near-duplicate detection — not started at all.** The
+  app only scans image files today (see ScanSessionService's
+  ImageExtensions list); no video sampling/hashing exists yet despite Core
+  being scoped for it in the Architecture section below.
+- **Organization**: no automated undo — the move log
+  (%LOCALAPPDATA%\ImageCleanup\move-logs\*.json) is a human-readable manual
+  safety net, not an undo button. Also no per-file selective move yet — v1
+  is all-or-nothing (the whole plan executes, or none of it); no way to
+  select/deselect individual files or categories, or edit a
+  conflict-resolved target filename, before executing. Relatedly, there is
+  still no staging table for Organization (OrganizationStagingRepository
+  remains Duplicates-only) — v1 executes directly from the plan after a
+  confirm dialog rather than through a staging/review cycle the way
+  Duplicates/Quality work; whether Organization ever needs staging is an
+  open question, not a settled gap.
+- **App still cannot build via CLI** — `dotnet build`/`dotnet run` fail
+  with MSB4062 (PRI/MRT packaging task missing outside Visual Studio).
+  Core/Data build and test fine via CLI; the App project requires Visual
+  Studio F5. This has been true since early in the project and hasn't
+  changed.
+- **WinUI 3 vs. WPF**: raised early in the project as a possible migration
+  given packaging friction, never revisited or decided. Core and Data have
+  no UI framework dependency either way, so this is purely an App-layer
+  question whenever it gets picked back up.
+- **No installer or distribution path** — the app currently only runs from
+  source via Visual Studio; framework-dependent, requires Windows App
+  Runtime 1.6.x installed on the target machine.
+- **Recursive scanning** is verified correct on nested folders (hidden/
+  system/reparse-point skipping, graceful failure handling on
+  inaccessible/missing directories — see Core.IO.ImageFileEnumerator) but
+  not stress-tested at large scale (tens of thousands of files);
+  performance at that scale is unverified.
+- **No settings/preferences persistence** — nothing is remembered between
+  launches (e.g. the last-scanned folder), so every session starts from
+  "Select Folder."
+- Orphaned FileCacheRepository rows after an Organization move — no cache
+  cleanup for moved files' old paths (harmless today; worth revisiting
+  alongside the thumbnail-cache-eviction gap below if it bloats over time).
+- Thumbnail cache eviction/cleanup — the disk cache under
+  %LOCALAPPDATA%\ImageCleanup\thumbnails grows unbounded today.
+- IsScreenshot / LowDetail signals aren't shown anywhere in the UI
+  (BlurScore is, in Quality) — ScreenshotHeuristic itself is unused in
+  favor of MetadataClassifier's HasExif-based approach (see Completed,
+  session 12) but remains in Core in case it's useful elsewhere later.
+- Quality's review list has no thumbnail-size detail view equivalent to
+  Duplicates' GroupDetailDialog (not requested — Quality's flat list
+  already shows a 64px thumbnail per row).
 
 ### Manual verification needed (Alan, via Visual Studio F5)
 Thumbnails and the group detail view were built and unit-tested where
@@ -598,7 +721,50 @@ When run:
   Year/Month/Category bucket, confirm the second one shows both its
   original name AND a "renamed" badge with the new "(from FolderName)"
   target name, while the first keeps its plain name with no badge.
-- Organization — nothing moves: confirm there is no Commit/move button
-  anywhere on this page, and closing/reopening the folder or switching
-  tabs doesn't touch any file on disk — this pass is preview-only by
-  design.
+- **Organization move execution — USE A DISPOSABLE TEST FOLDER, NOT A REAL
+  PHOTO LIBRARY.** This is the first feature in the app that moves files
+  outside Recycle Bin safety; verify carefully on throwaway data (copies of
+  a few test images, not anything you care about) before ever pointing it
+  at real photos.
+  - Scan the disposable test folder, switch to Organization, click "Choose
+    Destination…" and confirm the picker opens and defaults to (or lets
+    you browse from) the scanned folder; confirm the chosen path displays
+    clearly next to the button.
+  - Click "Organize Files…" and confirm the confirmation dialog shows the
+    destination path and an explicit, clear warning that this is a real
+    move, not reversible through the Recycle Bin — read it carefully
+    rather than clicking through.
+  - After confirming, check %LOCALAPPDATA%\ImageCleanup\move-logs\ for a
+    new move-log_*.json file, and open it — confirm it lists every file
+    that was in the plan with correct source/destination paths, in a
+    format you could act on manually if you ever needed to reverse a move.
+  - Confirm the files actually moved to
+    <destination>\<Year>\<Month>\<Photo|NoMetadata>\<filename>, and that a
+    conflict-renamed file landed at its "(from FolderName)" name, not the
+    original.
+  - Confirm the summary dialog shows correct succeeded/failed counts and
+    the move log path; if you can arrange a locked/in-use file to force one
+    failure, confirm the rest of the batch still completes and the failure
+    is reported rather than the whole thing aborting.
+  - Confirm Duplicates and Quality both reflect the moved files' new
+    state after execution (gone from their old location, without needing
+    a manual rescan) — this depends on ExecutePlanAsync calling
+    ScanSessionService.RefreshAsync().
+  - Only after all of the above look right on disposable data would it be
+    reasonable to try this against a real folder — and even then, treat it
+    as safe to abandon a scan on, not as tested-to-perfection.
+- Organization — hybrid month folder naming: on the same disposable test
+  folder, after running Organize Files, confirm the created month folders
+  are named like "01 - January", "03 - March" (zero-padded number, " - ",
+  full month name) — not plain "01" and not just "January". Confirm the
+  TreeView preview (before executing) still shows the Month node's label
+  as just the word name ("January", not "01 - January") — the preview
+  intentionally did not change.
+- Quality ComboBox blanking fix: scan a folder with several files in
+  Quality, stage a Delete on one, commit it so the list shrinks by one
+  row, then check every remaining row's action ComboBox — confirm none of
+  them show blank; each should show its actual current action ("None"
+  unless you'd changed it). Repeat with staging/removing a few different
+  rows (not just the first or last) to exercise different container-reuse
+  positions, since the bug was intermittent/position-dependent rather
+  than affecting every row every time.

@@ -46,11 +46,20 @@
                                    FontSize="12"
                                    Opacity="0.7"
                                    ToolTipService.ToolTip="BlurScore (Laplacian variance) — lower means blurrier"/>
-                        <!-- Action picker: None/Keep/Delete/Move, default None -->
+                        <!--
+                            Action picker: None/Keep/Delete/Move, default None.
+                            Bound via SelectedIndex (not SelectedItem) — this
+                            ListView virtualizes, and a SelectedItem-bound
+                            ComboBox can show blank after a container is
+                            reused for a different FileActionViewModel post
+                            row-removal (e.g. after a delete shrinks the
+                            list). SelectedIndex has no ItemsSource item to
+                            re-match on reuse, so it isn't affected.
+                        -->
                         <ComboBox Grid.Column="3"
                                   Margin="8,0"
                                   ItemsSource="{x:Bind AvailableActions}"
-                                  SelectedItem="{x:Bind SelectedAction, Mode=TwoWay}"
+                                  SelectedIndex="{x:Bind SelectedActionIndex, Mode=TwoWay}"
                                   FontSize="12"
                                   HorizontalAlignment="Stretch"/>
                         <!-- Move target path (only visible when Move selected) -->

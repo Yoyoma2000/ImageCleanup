@@ -4,20 +4,39 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:viewmodels="using:ImageCleanup.App.ViewModels">
 
-    <Grid RowDefinitions="Auto,*" Padding="16">
+    <Grid RowDefinitions="Auto,Auto,*" Padding="16">
 
         <TextBlock Grid.Row="0"
                    Text="{x:Bind ViewModel.StatusText, Mode=OneWay}"
                    TextWrapping="Wrap"
                    Margin="0,0,0,8"/>
 
+        <!-- ── Destination + execute ───────────────────────────────────── -->
+        <StackPanel Grid.Row="1" Spacing="6" Margin="0,0,0,8">
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <Button Content="Choose Destination…"
+                        Click="OnSelectDestinationClick"
+                        IsEnabled="{x:Bind ViewModel.IsIdle, Mode=OneWay}"/>
+                <TextBlock Text="{x:Bind ViewModel.DestinationFolder, Mode=OneWay}"
+                           VerticalAlignment="Center"
+                           TextWrapping="NoWrap"
+                           TextTrimming="CharacterEllipsis"
+                           Opacity="0.85"/>
+            </StackPanel>
+            <Button Content="Organize Files…"
+                    Click="OnExecuteClick"
+                    IsEnabled="{x:Bind ViewModel.CanExecutePlan, Mode=OneWay}"
+                    Style="{StaticResource AccentButtonStyle}"
+                    HorizontalAlignment="Left"/>
+        </StackPanel>
+
         <!--
-            Preview only — no commit/move controls yet. Thumbnails are NOT
-            requested for every file when the plan builds (a real library can
-            be thousands of files); OnTreeViewExpanding requests them only for
-            a Category node's files once that node is actually expanded.
+            Thumbnails are NOT requested for every file when the plan builds
+            (a real library can be thousands of files); OnTreeViewExpanding
+            requests them only for a Category node's files once that node is
+            actually expanded.
         -->
-        <TreeView Grid.Row="1"
+        <TreeView Grid.Row="2"
                   ItemsSource="{x:Bind ViewModel.RootNodes, Mode=OneWay}"
                   Expanding="OnTreeViewExpanding"
                   SelectionMode="None"

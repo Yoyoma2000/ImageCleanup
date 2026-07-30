@@ -121,10 +121,16 @@ public class OrganizationPlannerTests
         var record = MakeRecord(@"C:\Photos\a.jpg", dateTaken: new DateTime(2024, 3, 1), hasExif: true);
 
         var plan = OrganizationPlanner.BuildHierarchy([record]);
-
         var file = plan.Years.Single().Months.Single().Categories.Single().Files.Single();
-        Assert.Equal("2024/03/Photo", file.TargetFolder);
-        Assert.Equal("2024/03/Photo/a.jpg", file.TargetPath);
+
+        // Month folder is the hybrid "03 - March" format (not the plain "03"
+        // used by nothing else, and not the word-only "March" the TreeView
+        // preview uses) so File Explorer sorts chronologically while staying
+        // readable. Computed via the current culture rather than hardcoded,
+        // to match production and stay correct on non-English machines.
+        var monthName = System.Globalization.CultureInfo.CurrentCulture.DateTimeFormat.GetMonthName(3);
+        Assert.Equal($"2024/03 - {monthName}/Photo", file.TargetFolder);
+        Assert.Equal($"2024/03 - {monthName}/Photo/a.jpg", file.TargetPath);
     }
 
     [Fact]
