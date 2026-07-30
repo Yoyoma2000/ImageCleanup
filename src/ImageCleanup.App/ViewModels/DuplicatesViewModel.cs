@@ -80,7 +80,7 @@ public sealed class DuplicatesViewModel : INotifyPropertyChanged
         foreach (var r in scanned)
             _lastModifiedByPath[r.FilePath] = r.LastModified;
 
-        var imageRecords = scanned.Select(ToImageRecord);
+        var imageRecords = scanned.Select(ImageRecordMapper.ToImageRecord);
         var dupGroups    = SuggestionEngine.GroupDuplicates(imageRecords);
 
         foreach (var g in dupGroups)
@@ -241,19 +241,6 @@ public sealed class DuplicatesViewModel : INotifyPropertyChanged
 
     private DateTime GetLastModified(string filePath) =>
         _lastModifiedByPath.TryGetValue(filePath, out var lm) ? lm : File.GetLastWriteTimeUtc(filePath);
-
-    private static ImageRecord ToImageRecord(FileRecord r) => new()
-    {
-        FilePath       = r.FilePath,
-        FileHash       = r.FileHash,
-        PerceptualHash = r.PerceptualHash,
-        FileSize       = r.FileSize,
-        LastModified   = r.LastModified,
-        Width          = r.Width,
-        Height         = r.Height,
-        BlurScore      = r.BlurScore,
-        LowDetail      = r.LowDetail,
-    };
 
     private static void RecycleBinDelete(string path) =>
         Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(

@@ -4,8 +4,9 @@ namespace ImageCleanup.Data;
 
 /// <summary>
 /// Creates and upgrades the SQLite schema. Safe to call on every startup —
-/// all DDL uses IF NOT EXISTS, and ADD COLUMN migrations are idempotent
-/// (duplicate-column exceptions are silently swallowed).
+/// all DDL uses IF NOT EXISTS, and ADD COLUMN migrations check column
+/// existence via PRAGMA table_info first, so no exception is thrown (and
+/// caught) on the normal case where the column already exists.
 /// </summary>
 public static class DbInitializer
 {
@@ -59,19 +60,36 @@ public static class DbInitializer
         cmd.ExecuteNonQuery();
 
         // ── Column-level upgrades for pre-existing databases ─────────────────
-        // Each ALTER TABLE ADD COLUMN is a no-op if the column already exists.
-        AddColumnIfMissing(connection, "ALTER TABLE FileRecords ADD COLUMN LowDetail INTEGER");
-        AddColumnIfMissing(connection, "ALTER TABLE FileRecords ADD COLUMN SchemaVersion INTEGER NOT NULL DEFAULT 0");
+        // Each call is a no-op if the column already exists (checked via
+        // PRAGMA table_info rather than attempt-and-catch).
+        AddColumnIfMissing(connection, "FileRecords", "LowDetail", "INTEGER");
+        AddColumnIfMissing(connection, "FileRecords", "SchemaVersion", "INTEGER NOT NULL DEFAULT 0");
     }
 
-    private static void AddColumnIfMissing(SqliteConnection connection, string alterSql)
+    private static void AddColumnIfMissing(SqliteConnection connection, string tableName, string columnName, string columnTypeSql)
     {
-        try
+        if (ColumnExists(connection, tableName, columnName)) return;
+
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER TABLE {tableName} ADD COLUMN {columnName} {columnTypeSql}";
+        cmd.ExecuteNonQuery();
+    }
+
+    private static bool ColumnExists(SqliteConnection connection, string tableName, string columnName)
+    {
+        using var cmd = connection.CreateCommand();
+        // Table names can't be bound as PRAGMA parameters; tableName is always
+        // one of our own hard-coded constants above, never external input.
+        cmd.CommandText = $"PRAGMA table_info({tableName})";
+
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
         {
-            using var cmd = connection.CreateCommand();
-            cmd.CommandText = alterSql;
-            cmd.ExecuteNonQuery();
+            // PRAGMA table_info columns: cid, name, type, notnull, dflt_value, pk
+            var existingColumnName = reader.GetString(1);
+            if (string.Equals(existingColumnName, columnName, StringComparison.OrdinalIgnoreCase))
+                return true;
         }
-        catch (SqliteException) { /* duplicate column name — already present */ }
+        return false;
     }
 }

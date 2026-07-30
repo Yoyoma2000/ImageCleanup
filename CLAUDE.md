@@ -5,8 +5,14 @@ C#/.NET 9, WinUI 3 for UI.
 
 ## Architecture
 - src/ImageCleanup.Core — pure logic, no UI/IO framework deps. Hashing,
-  quality scoring, EXIF parsing, screenshot heuristics, video sampling.
-  Must stay unit-testable without a UI or filesystem mock.
+  quality scoring, EXIF parsing, screenshot heuristics, HasExif-based
+  metadata classification (MetadataClassifier — the current, more reliable
+  approach for Organization; see Status below for why over
+  ScreenshotHeuristic), recursive directory walking (IO.ImageFileEnumerator),
+  video sampling. Must stay unit-testable without a UI or filesystem mock —
+  ImageFileEnumerator does touch the filesystem (like ExifReader/DHasher
+  already do) but has no UI framework dependency, so it's still testable
+  here with real temp directories.
 - src/ImageCleanup.Data — SQLite cache (Microsoft.Data.Sqlite) for file
   hashes/metadata, and per-feature staging models. Each feature that stages
   file actions gets its own table + repository (OrganizationStaging /
@@ -45,6 +51,12 @@ C#/.NET 9, WinUI 3 for UI.
 - File moves/deletes always go through a staged/dry-run step before
   touching disk — no direct File.Delete calls from ViewModels.
 - New hashing/scoring logic goes in Core with a matching xUnit test.
+- DbInitializer's column-existence checks use PRAGMA table_info(<table>)
+  rather than attempt-ALTER-TABLE-and-catch — deliberate, don't revert:
+  the old pattern threw (and Visual Studio surfaced as first-chance
+  exceptions) on every normal startup once a column already existed,
+  since SQLite has no ADD COLUMN IF NOT EXISTS. Avoid using exceptions for
+  expected control flow here.
 - Claude Code cannot launch or interact with the WinUI app (no GUI
   access) — after a green build, describe what should happen when run
   and defer actual UI verification (build success in Visual Studio,
@@ -63,7 +75,7 @@ C#/.NET 9, WinUI 3 for UI.
 - Always parse DateTime from SQLite with DateTimeStyles.RoundtripKind.
 
 ## Status
-Sessions 1–11 complete. 118 tests passing (76 Core, 42 Data), 0 failures.
+Sessions 1–17 complete. 148 tests passing (101 Core, 47 Data), 0 failures.
 
 ### Completed
 - Core: DHash perceptual hash + Hamming distance, BlurDetector (Laplacian
@@ -230,6 +242,166 @@ Sessions 1–11 complete. 118 tests passing (76 Core, 42 Data), 0 failures.
   as Duplicates' own commit already does. QualityPage uses
   NavigationCacheMode.Enabled like DuplicatesPage, for the same reason
   (avoid re-subscribing to ScanCompleted on every nav visit).
+- Finding: a temporary diagnostic (Debug.WriteLine dump of IsScreenshot vs.
+  HasExif vs. actual dimensions, added and removed within this session —
+  no longer in the codebase) run against real mixed folders (screenshots +
+  actual camera/phone photos) showed ScreenshotHeuristic's aspect-ratio
+  matching added little over HasExif alone — HasExif by itself was the far
+  more reliable signal for telling real photos apart from everything else.
+  Decision: for Organization purposes, classify files by HasExif directly
+  rather than gating on ScreenshotHeuristic. Added Core.Metadata.
+  MetadataCategory (Photo / NoMetadata) and Core.Metadata.MetadataClassifier.
+  ClassifyMetadata(ExifMetadata) -> MetadataCategory, a pure HasExif ->
+  enum mapping (unit-tested). Named NoMetadata rather than "Screenshot"
+  deliberately: it also catches downloads, memes, and edited/resaved images
+  that lost their EXIF on save, not just screenshots. ScreenshotHeuristic
+  itself is untouched and still available — it's just not used to gate this
+  categorization anymore.
+- Recursive folder scanning: ScanSessionService now scans a selected folder's
+  entire subtree (no depth limit) instead of just the top level. Added
+  Core.IO.ImageFileEnumerator — manual stack-based recursion rather than
+  `Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)`,
+  deliberately: that single-call form has no way to skip a specific
+  subdirectory, and one inaccessible folder anywhere in the tree throws and
+  aborts the entire enumeration. Walking directory-by-directory means each
+  directory's failure is independent (permission-denied, broken
+  junction/symlink, a directory that disappears mid-scan — all just get
+  skipped, recorded, and the walk continues) and files stream out via
+  `yield return` as each directory is visited, so per-file processing
+  (hashing, EXIF, thumbnailing) can start well before the whole tree has
+  been walked. Hidden and system subdirectories (FileAttributes.Hidden /
+  .System) are skipped during recursion — not applied to the user-selected
+  root itself, only to subdirectories discovered while walking. Skipped
+  directories are collected (ScanSessionService.LastSkippedDirectories) and
+  surface as a "(N folder(s) skipped...)" suffix on StatusText rather than
+  a separate log. DuplicatesViewModel and QualityViewModel needed zero
+  changes — both already read unconditionally from
+  ScanSessionService.Records, so nested files flow through to both features
+  automatically (confirmed by inspection, no top-level-only assumptions
+  found elsewhere in the App layer). StatusText now says "including
+  subfolders" to make the recursive behavior visible to the user.
+- Bug fix: ThumbnailCache crashed with an unhandled IOException
+  ("...being used by another process") once recursive scanning started
+  requesting far more thumbnails concurrently. Root cause: two concurrent
+  callers requesting the same cache key (same file path + LastModified +
+  maxDimension — e.g. a FileActionViewModel row and its corresponding
+  StagingEntryViewModel row both request a thumbnail for the same staged
+  file, independently and concurrently via ThumbnailLoader's
+  Task.Run-per-request pattern) raced on the same cache PNG file with no
+  synchronization at all. Fixed with a static
+  ConcurrentDictionary<string, SemaphoreSlim> keyed by the absolute cache
+  file path (static and path-keyed rather than per-instance: Duplicates and
+  Quality each own a separate ThumbnailCache instance, but both point at
+  the same physical cache directory by default, so the lock has to work
+  across instances, not just within one) — the second concurrent caller
+  waits for the first to finish and then reads its result via a
+  double-checked cache read, rather than racing to write. Cache writes now
+  go through a temp-file-then-File.Move(overwrite:true) pattern (defense in
+  depth alongside the lock, shrinking the window where a reader could hit a
+  partially-written file to a single rename). Cache reads/generates/writes
+  each now catch IOException specifically and fail gracefully (return
+  null/skip that one thumbnail) instead of propagating and crashing the
+  scan. Added a concurrency test (32 parallel calls across multiple
+  ThumbnailCache instances for the same key) confirming no exception and
+  consistent results — stable across repeated runs.
+- Investigated (per the same fix): whether recursive scanning could
+  discover the same physical file more than once, e.g. via a directory
+  reparse point (junction/symlink) resolving back to an already-visited
+  location. Confirmed ImageFileEnumerator had no defense against this.
+  Added two guards: subdirectories with FileAttributes.ReparsePoint are now
+  skipped during recursion (same as hidden/system — this is the actual fix
+  for reparse-point cycles, since a lightweight visited-directory set can't
+  detect "same physical directory via a different logical path" without
+  resolving the reparse target); and a per-walk yielded-files set dedupes
+  by resolved full path as defense in depth for the same physical file
+  being reachable under two literal paths. Not directly attributable as
+  *the* cause of the observed crash — analysis suggests the thumbnail race
+  above is fully explained by ordinary concurrent requests for the same
+  staged file's thumbnail, independent of any duplicate-discovery bug — but
+  the reparse-point gap was real and worth closing regardless. Not
+  portably unit-testable: confirmed experimentally that Windows silently
+  ignores attempts to set FileAttributes.ReparsePoint directly via
+  File.SetAttributes on a plain directory (it only takes effect via actual
+  junction/symlink creation APIs), so this can't be simulated in a
+  deterministic cross-environment test the way the hidden/system skip
+  tests are.
+- Organization hierarchy engine (Core.Organization) — **Core-only planning
+  logic, no UI or file-moving yet.** OrganizationPlanner.BuildHierarchy
+  (IEnumerable<ImageRecord>) -> OrganizationPlan computes a proposed
+  Year/Month/MetadataCategory folder tree (e.g. "2024/03/Photo") without
+  touching the filesystem — nothing is moved, this only computes what
+  *would* happen. Year/Month comes from ImageRecord.DateTaken, falling back
+  to LastModified when DateTaken is null (always true for NoMetadata-
+  category files, by definition); MetadataCategory reuses the existing
+  MetadataClassifier (Photo/NoMetadata) rather than duplicating that logic.
+  ImageRecord gained two new fields to support this (DateTaken, HasExif) —
+  additive/non-breaking, existing SuggestionEngine/App-layer mapping code
+  untouched, both just default (null/false) where not populated. The plan
+  is a tree of YearGroup -> MonthGroup -> CategoryGroup -> PlannedFile,
+  each level carrying a Label and FileCount for a future TreeView to bind
+  to directly. Naming conflicts (two files resolving to the same filename
+  within the same destination folder) are resolved by appending the
+  source file's parent folder name (e.g. "IMG_0001 (from Test).jpg"); if
+  that's *still* not unique (same filename AND same parent folder name,
+  e.g. two different drives both having a "Test" folder), falls back to
+  numbering ("IMG_0001 (from Test) (2).jpg"). Conflict resolution is scoped
+  per destination folder (a HashSet reset per CategoryGroup) — same
+  filename landing in two different Year/Month buckets is not a conflict.
+  10 new tests: year/month grouping and ordering, DateTaken vs.
+  LastModified fallback (both directions), Photo/NoMetadata split within a
+  month, target folder/path computation, both conflict-resolution tiers,
+  conflict scoping across destination folders, and empty input.
+- OrganizationPlanner can now run against real scanned data. Added
+  Data.Models.ImageRecordMapper (FileRecord -> ImageRecord extension method,
+  `ToImageRecord()`) as the single centralized conversion — previously this
+  mapping only existed as a private method inside DuplicatesViewModel; it's
+  now shared so Quality/Organization don't grow their own copies (Quality
+  doesn't currently need it; Organization will). DateTaken copies straight
+  from FileRecord.DateTaken (already cached from ExifReader during scan —
+  confirmed, no schema change needed). HasExif has no persisted FileRecord
+  column, so it's derived as `DateTaken.HasValue || CameraModel is not
+  null` — both of those are only ever populated from the same EXIF read
+  that would have set HasExif, so either one present already implies it.
+  4 new tests confirm the round-trip (EXIF present -> DateTaken + HasExif
+  true, no EXIF -> both null/false, CameraModel-only -> still HasExif true,
+  and the other fields copy through unchanged). Confirmed SuggestionEngine
+  doesn't read DateTaken/HasExif at all, so Duplicates' grouping behavior
+  is provably unchanged; Quality doesn't use ImageRecord/this mapper at
+  all — neither feature's existing tests needed changes.
+- Organization preview UI: OrganizationPage/OrganizationViewModel replace
+  the stub — a TreeView over OrganizationPlanner's proposed Year/Month/
+  Category hierarchy. **Preview only — no commit/move controls, nothing
+  moves a file yet** (that's the next step). Split the mapping in two
+  layers, same "extract the pure part to Core" pattern as KeepSelector/
+  QualityReviewOrder: Core.Organization.OrganizationTreeNode +
+  OrganizationTreeBuilder.BuildTree(OrganizationPlan) is a pure,
+  UI-framework-free flattening of the plan into label/count/rename-aware
+  nodes (unit-tested, 6 new tests — Year/Month/Category node shape, month
+  NAME not number, file node source/target names, both renamed and
+  not-renamed cases); App-layer OrganizationNodeViewModel is a thin
+  wrapper adding only Thumbnail/DispatcherQueue/Visibility properties on
+  top, kept deliberately dumb so the actual logic stays testable. Renamed
+  files (conflict resolution changed the name) show their target filename
+  plus a small "renamed" badge, both driven by OrganizationTreeNode.
+  WasRenamed. OrganizationViewModel.RebuildAsync runs
+  BuildHierarchy+BuildTree inside Task.Run (mandatory per the perf
+  requirement — a real library can be thousands of files) and rebuilds on
+  ScanSessionService.ScanCompleted, same trigger Duplicates/Quality use,
+  though unlike them this one is genuinely async instead of synchronous,
+  specifically because of that perf requirement. Thumbnails are NOT
+  requested for every file when the plan builds; TreeView.Expanding (wired
+  in OrganizationPage's code-behind) calls
+  OrganizationViewModel.RequestThumbnailsFor(node) which only generates
+  thumbnails for a Category node's files the first time that node is
+  actually expanded — the one piece of "lazy loading" implemented, since
+  it directly targets the expensive part (thumbnail generation) without
+  the added complexity of also lazily materializing the tree-node objects
+  themselves (those are cheap, no I/O, so built eagerly off the snapshot
+  once BuildHierarchy/BuildTree return — see file for the explicit
+  reasoning if this needs revisiting on very large libraries, since
+  DispatcherQueue.GetForCurrentThread() is still called once per node
+  including every file node, which is a real if likely-minor per-node
+  cost at large scale).
 
 ### Known constraints
 - App runs via Visual Studio F5 only — `dotnet build`/`dotnet run` fail with
@@ -240,16 +412,25 @@ Sessions 1–11 complete. 118 tests passing (76 Core, 42 Data), 0 failures.
   Core and Data have no UI framework dependency and would be unaffected.
 
 ### Not yet started
-- Organization feature: nav item + stub page exist (OrganizationPage), but
-  no ViewModel or staging logic — virtual folder organization is not
-  implemented. OrganizationStagingRepository/CommitService are currently
-  only used by Duplicates; Quality now has its own QualityStagingRepository
-  (see above) — Organization will need to decide whether it reuses
-  OrganizationStaging (it's already named for this feature) or gets its own
-  table following the same separate-table precedent as Quality.
+- Organization feature: the TreeView preview (OrganizationPage/
+  OrganizationViewModel) is now in place — nav item, planning engine, real
+  data, and the UI to see it all exist. What's still missing: any way to
+  actually act on the plan. No staging, no commit, no move-execution UI —
+  the page is genuinely look-but-don't-touch. Needs: a staging model
+  decision (reuse OrganizationStagingRepository — it's already named for
+  this feature — or follow Quality's separate-table precedent), a way to
+  approve/edit the plan (e.g. per-file override for a bad conflict
+  resolution or an unwanted category placement), and the actual
+  move-execution flow (reusing CommitService's IStagingRepository
+  generalization the same way Quality does, presumably, but Organization's
+  "action" is Move — to a computed path — rather than Delete/Move-to-
+  user-chosen-path, so CommitService's Move branch may need to accept a
+  planned/computed target rather than only a user-typed TargetPath).
+- MetadataCategory (Photo/NoMetadata) is now consumed end-to-end from real
+  data all the way through to the UI (OrganizationPlanner <-
+  ImageRecordMapper <- FileRecord, rendered as TreeView category nodes).
 - IsScreenshot / LowDetail signals shown in UI (BlurScore now shown, in
   Quality)
-- Recursive folder scanning (currently top-level only)
 - Installer / distribution
 - Thumbnail cache eviction/cleanup (cache directory grows unbounded today)
 - Quality review list has no thumbnail-size detail view equivalent to
@@ -261,7 +442,11 @@ Sessions 1–11 complete. 118 tests passing (76 Core, 42 Data), 0 failures.
   and the new Quality feature via Visual Studio F5 (see "Manual
   verification needed" below) — none of this is CLI-testable at the App
   layer.
-- Organization feature (staging model decision above, then ViewModel/Page).
+- Organization move-execution + conflict-handling UI: the preview TreeView
+  is done — next is turning the plan into real staged actions (staging
+  model decision above), a way to review/override individual files before
+  committing (especially conflict-renamed ones), and an actual commit flow
+  that moves files to their computed target paths.
 
 ### Manual verification needed (Alan, via Visual Studio F5)
 Thumbnails and the group detail view were built and unit-tested where
@@ -364,3 +549,56 @@ When run:
   Duplicates or Organization and back — confirm the staged state and scroll
   position survived (NavigationCacheMode.Enabled keeping QualityViewModel
   alive across nav, same as DuplicatesPage).
+- Recursive scanning: select a real folder with actual nested subfolders
+  (not just top-level files) and confirm files at every level — top folder,
+  one level deep, two+ levels deep — show up in both the Duplicates and
+  Quality tabs, not just top-level files. Confirm StatusText says
+  "...including subfolders" and the file count matches the true tree-wide
+  total (count files yourself via Explorer if unsure).
+- Recursive scanning — hidden/system folders: if the test folder has (or
+  you create) a hidden or system-attribute subfolder inside it, confirm its
+  files do NOT show up in either tab, while sibling non-hidden folders'
+  files still do.
+- Recursive scanning — performance: try a folder with a deep/wide real
+  nested structure (e.g. a full Pictures library with many
+  year/month/event subfolders) and confirm the scan completes in
+  reasonable time and the UI doesn't appear frozen while it runs (status
+  text should still update to "Scanning…" immediately, per the existing
+  async pattern).
+- Recursive scanning — inaccessible folders: if feasible, point the scan at
+  a folder containing a subfolder you don't have permission to read (or a
+  broken shortcut/junction) and confirm the scan completes normally rather
+  than showing a "Scan failed" error, with the StatusText's
+  "(N folder(s) skipped...)" suffix reflecting it.
+- ThumbnailCache crash fix: this is the main thing to re-verify from this
+  session — re-run the exact scenario that crashed before (a real, sizeable
+  nested folder structure with recursive scanning) and confirm the app no
+  longer crashes with an IOException while thumbnails are loading. Watch
+  both the Duplicates and Quality tabs populate with thumbnails
+  simultaneously (they each request thumbnails independently and now share
+  the same lock over the same cache folder) and confirm none show up
+  broken/blank in a way that looks different from an ordinary "couldn't
+  generate this one" case. If you have Developer Mode enabled and can
+  create a real symlinked/junctioned subfolder inside a scan folder,
+  confirm the scan no longer hangs or loops on it (skipped, same as a
+  hidden folder) — this specific case wasn't unit-testable.
+- Organization preview: select a real folder and switch to the Organization
+  tab — confirm the summary line shows a sensible file/month count, and
+  the tree shows Year -> Month (real month names, e.g. "March", not "03")
+  -> Photo/NoMetadata -> individual files. Confirm a Photo-category file
+  you know has EXIF (a real camera/phone photo) actually lands under
+  Photo, and a screenshot/download lands under NoMetadata.
+- Organization — thumbnails load lazily: expand a Category node and
+  confirm thumbnails populate progressively (not all at once instantly,
+  and not before you expand) — this confirms the Expanding-triggered lazy
+  load is actually working rather than the tree eagerly loading everything
+  upfront.
+- Organization — rename detection: if your test folder has two files with
+  the same filename in different subfolders that would land in the same
+  Year/Month/Category bucket, confirm the second one shows both its
+  original name AND a "renamed" badge with the new "(from FolderName)"
+  target name, while the first keeps its plain name with no badge.
+- Organization — nothing moves: confirm there is no Commit/move button
+  anywhere on this page, and closing/reopening the folder or switching
+  tabs doesn't touch any file on disk — this pass is preview-only by
+  design.

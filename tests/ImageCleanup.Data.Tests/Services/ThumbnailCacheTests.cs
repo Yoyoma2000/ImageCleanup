@@ -59,6 +59,34 @@ public class ThumbnailCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task GetOrCreateThumbnail_ConcurrentCallsForSameKey_DoNotThrow_AndReturnConsistentResults()
+    {
+        var lastModified = File.GetLastWriteTimeUtc(_sourcePath);
+
+        const int concurrency = 32;
+        var tasks = new Task<byte[]?>[concurrency];
+        for (int i = 0; i < concurrency; i++)
+        {
+            // A fresh ThumbnailCache instance per task, all pointing at the same
+            // directory — mirrors the real scenario where Duplicates and Quality
+            // each own a separate ThumbnailCache instance over the same shared
+            // cache folder, so the lock must work across instances too.
+            var cache = new ThumbnailCache(_cacheDir);
+            tasks[i] = Task.Run(() => cache.GetOrCreateThumbnail(_sourcePath, lastModified));
+        }
+
+        var results = await Task.WhenAll(tasks);
+
+        Assert.All(results, r => Assert.NotNull(r));
+        var first = results[0]!;
+        Assert.All(results, r => Assert.Equal(first, r));
+
+        // Exactly one cache file for this key — no corrupted/partial duplicates
+        // left behind by racing writers.
+        Assert.Single(Directory.GetFiles(_cacheDir));
+    }
+
+    [Fact]
     public void GetOrCreateThumbnail_CorruptFile_ReturnsNull()
     {
         var corruptPath = Path.ChangeExtension(Path.GetTempFileName(), ".png");

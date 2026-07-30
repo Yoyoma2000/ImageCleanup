@@ -20,4 +20,10 @@ public sealed class ImageRecord
     /// prevent false positives from solid-colour / near-blank images.
     /// </summary>
     public bool? LowDetail { get; init; }
+
+    /// <summary>EXIF-embedded capture date, if any. Used by OrganizationPlanner (falls back to LastModified when null).</summary>
+    public DateTime? DateTaken { get; init; }
+
+    /// <summary>Whether the file had any EXIF metadata at all. Used by OrganizationPlanner via MetadataClassifier.</summary>
+    public bool HasExif { get; init; }
 }

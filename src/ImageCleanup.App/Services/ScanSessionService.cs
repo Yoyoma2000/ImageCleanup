@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using ImageCleanup.Core.Hashing;
+using ImageCleanup.Core.IO;
 using ImageCleanup.Core.Metadata;
 using ImageCleanup.Core.Quality;
 using ImageCleanup.Data;
@@ -98,9 +99,13 @@ public sealed class ScanSessionService : INotifyPropertyChanged
             Records.Clear();
             foreach (var r in scanned) Records.Add(r);
 
+            var skippedSuffix = _lastSkippedDirectories.Count > 0
+                ? $" ({_lastSkippedDirectories.Count} folder(s) skipped — hidden, system, or inaccessible)"
+                : string.Empty;
+
             StatusText = scanned.Count == 0
-                ? "No image files found in that folder."
-                : $"{scanned.Count} file(s) scanned.";
+                ? $"No image files found in that folder (including subfolders).{skippedSuffix}"
+                : $"{scanned.Count} file(s) scanned, including subfolders.{skippedSuffix}";
 
             ScanCompleted?.Invoke(this, EventArgs.Empty);
         }
@@ -114,16 +119,18 @@ public sealed class ScanSessionService : INotifyPropertyChanged
         }
     }
 
+    /// <summary>Directories skipped (hidden/system/inaccessible) during the most recent scan.</summary>
+    public IReadOnlyList<string> LastSkippedDirectories => _lastSkippedDirectories;
+    private List<string> _lastSkippedDirectories = [];
+
     private List<FileRecord> ScanFiles(string folderPath)
     {
         var repo    = new FileCacheRepository(_connectionString);
         var results = new List<FileRecord>();
 
-        var files = Directory
-            .EnumerateFiles(folderPath)
-            .Where(p => ImageExtensions.Contains(
-                Path.GetExtension(p), StringComparer.OrdinalIgnoreCase))
-            .ToList();
+        var skipped = new List<string>();
+        var files = ImageFileEnumerator.EnumerateFiles(folderPath, ImageExtensions, skipped);
+        _lastSkippedDirectories = skipped;
 
         foreach (var path in files)
         {
