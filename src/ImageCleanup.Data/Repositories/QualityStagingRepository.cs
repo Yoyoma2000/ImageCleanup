@@ -3,11 +3,20 @@ using Microsoft.Data.Sqlite;
 
 namespace ImageCleanup.Data.Repositories;
 
-public sealed class OrganizationStagingRepository : IStagingRepository
+/// <summary>
+/// Staging for the Quality feature's flagged files — a separate table (and
+/// class) from OrganizationStagingRepository/OrganizationStaging on purpose.
+/// Quality's "worth reviewing" flags and Duplicates' near-certain duplicate
+/// staging are different confidence levels and must not share a
+/// review/commit flow; keeping them in separate tables means neither
+/// feature's StageAction/GetPendingActions/ClearStaged/commit can ever
+/// accidentally touch the other's rows.
+/// </summary>
+public sealed class QualityStagingRepository : IStagingRepository
 {
     private readonly string _connectionString;
 
-    public OrganizationStagingRepository(string connectionString)
+    public QualityStagingRepository(string connectionString)
     {
         _connectionString = connectionString;
     }
@@ -18,7 +27,7 @@ public sealed class OrganizationStagingRepository : IStagingRepository
         using var connection = Open();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO OrganizationStaging (FileRecordId, Action, TargetPath, Reason, Committed)
+            INSERT INTO QualityStaging (FileRecordId, Action, TargetPath, Reason, Committed)
             VALUES ($fileRecordId, $action, $targetPath, $reason, 0)
             RETURNING Id
             """;
@@ -34,7 +43,7 @@ public sealed class OrganizationStagingRepository : IStagingRepository
     {
         using var connection = Open();
         using var cmd = connection.CreateCommand();
-        cmd.CommandText = "DELETE FROM OrganizationStaging WHERE Id = $id AND Committed = 0";
+        cmd.CommandText = "DELETE FROM QualityStaging WHERE Id = $id AND Committed = 0";
         cmd.Parameters.AddWithValue("$id", stagingId);
         cmd.ExecuteNonQuery();
     }
@@ -44,7 +53,7 @@ public sealed class OrganizationStagingRepository : IStagingRepository
     {
         using var connection = Open();
         using var cmd = connection.CreateCommand();
-        cmd.CommandText = "UPDATE OrganizationStaging SET TargetPath = $tp WHERE Id = $id";
+        cmd.CommandText = "UPDATE QualityStaging SET TargetPath = $tp WHERE Id = $id";
         cmd.Parameters.AddWithValue("$tp", targetPath ?? (object)DBNull.Value);
         cmd.Parameters.AddWithValue("$id", stagingId);
         cmd.ExecuteNonQuery();
@@ -56,7 +65,7 @@ public sealed class OrganizationStagingRepository : IStagingRepository
         using var cmd = connection.CreateCommand();
         cmd.CommandText = """
             SELECT Id, FileRecordId, Action, TargetPath, Reason, Committed
-            FROM OrganizationStaging
+            FROM QualityStaging
             WHERE Committed = 0
             """;
 
@@ -72,7 +81,7 @@ public sealed class OrganizationStagingRepository : IStagingRepository
         using var connection = Open();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = """
-            UPDATE OrganizationStaging
+            UPDATE QualityStaging
             SET Committed = 1
             WHERE Id = $id
             """;
@@ -84,7 +93,7 @@ public sealed class OrganizationStagingRepository : IStagingRepository
     {
         using var connection = Open();
         using var cmd = connection.CreateCommand();
-        cmd.CommandText = "DELETE FROM OrganizationStaging WHERE Committed = 0";
+        cmd.CommandText = "DELETE FROM QualityStaging WHERE Committed = 0";
         cmd.ExecuteNonQuery();
     }
 

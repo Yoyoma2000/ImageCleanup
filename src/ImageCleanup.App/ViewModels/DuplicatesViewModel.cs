@@ -1,12 +1,8 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
-using System.Security.Cryptography;
+using ImageCleanup.App.Services;
 using ImageCleanup.Core.Grouping;
-using ImageCleanup.Core.Hashing;
-using ImageCleanup.Core.Metadata;
-using ImageCleanup.Core.Quality;
-using ImageCleanup.Data;
 using ImageCleanup.Data.Models;
 using ImageCleanup.Data.Repositories;
 using ImageCleanup.Data.Services;
@@ -14,17 +10,23 @@ using Microsoft.UI.Xaml;
 
 namespace ImageCleanup.App.ViewModels;
 
-public sealed class MainViewModel : INotifyPropertyChanged
+/// <summary>
+/// Duplicates feature — reads its file list from the shared ScanSessionService
+/// (rather than scanning itself) and rebuilds duplicate groups/staging
+/// whenever a new scan completes.
+/// </summary>
+public sealed class DuplicatesViewModel : INotifyPropertyChanged
 {
-    private static readonly string[] ImageExtensions =
-        [".jpg", ".jpeg", ".png", ".webp", ".bmp"];
-
-    private readonly string _connectionString;
+    private readonly ScanSessionService _scanSession;
     private readonly OrganizationStagingRepository _stagingRepo;
+    private readonly ThumbnailCache _thumbnailCache = new();
+
+    /// <summary>Populated per rebuild so thumbnail requests can look up a file's LastModified for cache keying.</summary>
+    private readonly Dictionary<string, DateTime> _lastModifiedByPath = new(StringComparer.OrdinalIgnoreCase);
 
     // ── Observable state ─────────────────────────────────────────────────────
 
-    private string _statusText = "Ready — click \"Select Folder\" to start.";
+    private string _statusText = "Select a folder above to scan for duplicates.";
     public string StatusText
     {
         get => _statusText;
@@ -32,6 +34,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     private bool _isIdle = true;
+    /// <summary>True when not currently committing (gates the Commit button).</summary>
     public bool IsIdle
     {
         get => _isIdle;
@@ -49,72 +52,86 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     // ── Construction ──────────────────────────────────────────────────────────
 
-    public MainViewModel()
+    public DuplicatesViewModel(ScanSessionService scanSession)
     {
-        var appData = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "ImageCleanup");
-        Directory.CreateDirectory(appData);
+        _scanSession = scanSession;
+        _stagingRepo = new OrganizationStagingRepository(scanSession.ConnectionString);
 
-        var dbPath = Path.Combine(appData, "cache.db");
-        _connectionString = $"Data Source={dbPath}";
-        DbInitializer.Initialize(_connectionString);
-        _stagingRepo = new OrganizationStagingRepository(_connectionString);
+        _scanSession.ScanCompleted += (_, _) => RebuildFromRecords();
+
+        // If a scan already happened before this page/ViewModel was created
+        // (e.g. navigating back to Duplicates), rebuild immediately instead
+        // of waiting for another ScanCompleted event.
+        if (_scanSession.Records.Count > 0) RebuildFromRecords();
     }
 
-    // ── Scan ─────────────────────────────────────────────────────────────────
+    // ── Rebuild from the shared scan session ────────────────────────────────
 
-    public async Task ScanFolderAsync(string folderPath)
+    private void RebuildFromRecords()
     {
-        IsIdle = false;
         Groups.Clear();
         StagedItems.Clear();
         _stagingRepo.ClearStaged();
-        StatusText = "Scanning…";
 
-        try
+        var scanned  = _scanSession.Records;
+        var pathToId = scanned.ToDictionary(r => r.FilePath, r => r.Id, StringComparer.OrdinalIgnoreCase);
+
+        _lastModifiedByPath.Clear();
+        foreach (var r in scanned)
+            _lastModifiedByPath[r.FilePath] = r.LastModified;
+
+        var imageRecords = scanned.Select(ToImageRecord);
+        var dupGroups    = SuggestionEngine.GroupDuplicates(imageRecords);
+
+        foreach (var g in dupGroups)
         {
-            var scanned  = await Task.Run(() => ScanFiles(folderPath));
-            var pathToId = scanned.ToDictionary(r => r.FilePath, r => r.Id, StringComparer.OrdinalIgnoreCase);
-
-            var imageRecords = scanned.Select(ToImageRecord);
-            var dupGroups    = SuggestionEngine.GroupDuplicates(imageRecords);
-
-            foreach (var g in dupGroups)
+            var vm = new DuplicateGroupViewModel(g, pathToId);
+            foreach (var fa in vm.FileActions)
             {
-                var vm = new DuplicateGroupViewModel(g, pathToId);
-                foreach (var fa in vm.FileActions)
+                fa.ActionChanged = OnFileActionChanged;
+                RequestThumbnail(fa);
+                if (!fa.IsSuggested)
                 {
-                    fa.ActionChanged = OnFileActionChanged;
-                    if (!fa.IsSuggested)
-                    {
-                        var sid = _stagingRepo.StageAction(fa.FileRecordId, "Delete", null, "Duplicate detected");
-                        fa.StagingId = sid;
-                        StagedItems.Add(new StagingEntryViewModel(sid, fa.FilePath, "Delete"));
-                    }
+                    var sid = _stagingRepo.StageAction(fa.FileRecordId, "Delete", null, "Duplicate detected");
+                    fa.StagingId = sid;
+                    var staged = new StagingEntryViewModel(sid, fa.FilePath, "Delete");
+                    RequestThumbnail(staged);
+                    StagedItems.Add(staged);
                 }
-                Groups.Add(vm);
             }
+            Groups.Add(vm);
+        }
 
-            NotifyStagingPanel();
-            StatusText = scanned.Count == 0
-                ? "No image files found in that folder."
-                : $"{scanned.Count} file(s) scanned — {dupGroups.Count} duplicate group(s) found.";
-        }
-        catch (Exception ex)
-        {
-            StatusText = $"Scan failed: {ex.Message}";
-        }
-        finally
-        {
-            IsIdle = true;
-        }
+        NotifyStagingPanel();
+        StatusText = scanned.Count == 0
+            ? "No image files found in that folder."
+            : $"{dupGroups.Count} duplicate group(s) found among {scanned.Count} file(s).";
     }
 
     // ── Staging callbacks ─────────────────────────────────────────────────────
 
     private void OnFileActionChanged(FileActionViewModel fa)
     {
+        var group = Groups.FirstOrDefault(g => g.FileActions.Contains(fa));
+
+        // Only one file per group may be "Keep" at a time — bump any other
+        // current keep-file back to Delete. This recurses into
+        // OnFileActionChanged for that file (harmless: it resolves to
+        // Delete, not Keep, so it can't cascade further).
+        if (group is not null && fa.SelectedAction == KeepSelector.KeepAction)
+        {
+            var conflicts = KeepSelector.ResolveKeepConflicts(
+                group.FileActions.Select(f => (f.FilePath, f.SelectedAction)),
+                fa.FilePath);
+
+            foreach (var path in conflicts)
+            {
+                var other = group.FileActions.FirstOrDefault(f =>
+                    string.Equals(f.FilePath, path, StringComparison.OrdinalIgnoreCase));
+                if (other is not null) other.SelectedAction = "Delete";
+            }
+        }
+
         // Remove old staging row
         if (fa.StagingId.HasValue)
         {
@@ -124,14 +141,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
             fa.StagingId = null;
         }
 
-        // Create new staging row if user picked something actionable
-        if (fa.SelectedAction != "None")
+        // Create a staging row only for actionable choices — "Keep" and "None"
+        // both mean "do nothing to this file" and have no staged action.
+        if (fa.SelectedAction is "Delete" or "Move")
         {
             var sid = _stagingRepo.StageAction(fa.FileRecordId, fa.SelectedAction, null, "User staged");
             fa.StagingId = sid;
-            StagedItems.Add(new StagingEntryViewModel(sid, fa.FilePath, fa.SelectedAction));
+            var staged = new StagingEntryViewModel(sid, fa.FilePath, fa.SelectedAction);
+            RequestThumbnail(staged);
+            StagedItems.Add(staged);
         }
 
+        group?.NotifyKeepChanged();
         NotifyStagingPanel();
     }
 
@@ -171,12 +192,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
             }
 
             var result = await Task.Run(() =>
-                new CommitService(_connectionString, RecycleBinDelete).ExecutePendingActions());
+                new CommitService(_scanSession.ConnectionString, RecycleBinDelete).ExecutePendingActions());
 
-            // Clear UI state — files are gone/moved
-            Groups.Clear();
-            StagedItems.Clear();
-            NotifyStagingPanel();
+            // Files are gone/moved — refresh the shared scan session so every
+            // page (including this one, via ScanCompleted) reflects disk state.
+            await _scanSession.RefreshAsync();
+
             StatusText = result.Failed == 0
                 ? $"Done — {result.Succeeded} file(s) processed."
                 : $"Done — {result.Succeeded} succeeded, {result.Failed} failed.";
@@ -195,77 +216,31 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    private List<FileRecord> ScanFiles(string folderPath)
+    private const int DetailThumbnailMaxDimension = 320;
+
+    /// <summary>
+    /// Kicks off loading of the larger detail-view thumbnails for a group's files
+    /// (a separate ThumbnailCache entry/size from the list view's). Safe to call
+    /// every time the detail dialog opens — already-loaded thumbnails are skipped.
+    /// </summary>
+    public void RequestDetailThumbnails(DuplicateGroupViewModel group)
     {
-        var repo    = new FileCacheRepository(_connectionString);
-        var results = new List<FileRecord>();
-
-        var files = Directory
-            .EnumerateFiles(folderPath)
-            .Where(p => ImageExtensions.Contains(
-                Path.GetExtension(p), StringComparer.OrdinalIgnoreCase))
-            .ToList();
-
-        foreach (var path in files)
+        foreach (var fa in group.FileActions)
         {
-            try
-            {
-                var fi           = new FileInfo(path);
-                var lastModified = fi.LastWriteTimeUtc;
-
-                if (!repo.NeedsRescan(path, fi.Length, lastModified))
-                {
-                    var cached = repo.GetByPath(path);
-                    if (cached is not null) { results.Add(cached); continue; }
-                }
-
-                var fileHash = ComputeSha256(path);
-                var meta     = ExifReader.ReadMetadata(path);
-
-                ulong? perceptualHash = null;
-                double? blurScore    = null;
-                bool?   isLowDetail  = null;
-                try
-                {
-                    perceptualHash = DHasher.ComputeFromFile(path);
-                    blurScore      = BlurDetector.ComputeBlurScore(path);
-                    isLowDetail    = LowDetailDetector.IsLowDetail(path);
-                }
-                catch { /* corrupt or unsupported image */ }
-
-                var record = new FileRecord
-                {
-                    FilePath       = path,
-                    FileHash       = fileHash,
-                    PerceptualHash = perceptualHash,
-                    FileSize       = fi.Length,
-                    LastModified   = lastModified,
-                    Width          = meta.Width,
-                    Height         = meta.Height,
-                    BlurScore      = blurScore,
-                    DateTaken      = meta.DateTaken,
-                    CameraModel    = meta.CameraModel,
-                    IsScreenshot   = meta.Width.HasValue && meta.Height.HasValue
-                        ? ScreenshotHeuristic.IsLikelyScreenshot(meta, meta.Width.Value, meta.Height.Value)
-                        : null,
-                    LowDetail      = isLowDetail,
-                };
-
-                repo.Upsert(record);
-                results.Add(record);
-            }
-            catch { /* permission error or I/O failure */ }
+            if (fa.DetailThumbnail is not null) continue;
+            fa.RequestDetailThumbnail(() => _thumbnailCache.GetOrCreateThumbnail(
+                fa.FilePath, GetLastModified(fa.FilePath), DetailThumbnailMaxDimension));
         }
-
-        return results;
     }
 
-    private static string ComputeSha256(string path)
-    {
-        using var sha    = SHA256.Create();
-        using var stream = File.OpenRead(path);
-        return Convert.ToHexString(sha.ComputeHash(stream));
-    }
+    private void RequestThumbnail(FileActionViewModel fa) =>
+        fa.RequestThumbnail(() => _thumbnailCache.GetOrCreateThumbnail(fa.FilePath, GetLastModified(fa.FilePath)));
+
+    private void RequestThumbnail(StagingEntryViewModel entry) =>
+        entry.RequestThumbnail(() => _thumbnailCache.GetOrCreateThumbnail(entry.FilePath, GetLastModified(entry.FilePath)));
+
+    private DateTime GetLastModified(string filePath) =>
+        _lastModifiedByPath.TryGetValue(filePath, out var lm) ? lm : File.GetLastWriteTimeUtc(filePath);
 
     private static ImageRecord ToImageRecord(FileRecord r) => new()
     {

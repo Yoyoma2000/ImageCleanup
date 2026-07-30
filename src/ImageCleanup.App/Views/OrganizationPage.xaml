@@ -1,0 +1,19 @@
+<Page
+    x:Class="ImageCleanup.App.Views.OrganizationPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Grid>
+        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="4">
+            <TextBlock Text="Organization"
+                       FontSize="24"
+                       FontWeight="SemiBold"
+                       HorizontalAlignment="Center"
+                       Opacity="0.7"/>
+            <TextBlock Text="Coming soon — virtual folder organization will live here."
+                       FontSize="14"
+                       HorizontalAlignment="Center"
+                       Opacity="0.5"/>
+        </StackPanel>
+    </Grid>
+</Page>

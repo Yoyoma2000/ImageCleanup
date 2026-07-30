@@ -41,6 +41,20 @@ public static class DbInitializer
                 Reason        TEXT,
                 Committed     INTEGER NOT NULL DEFAULT 0
             );
+
+            -- Deliberately a separate table from OrganizationStaging rather than
+            -- a shared-table-with-discriminator: Quality's "worth reviewing" flags
+            -- and Duplicates' near-certain dup staging represent different
+            -- confidence levels and must not share a review/commit flow (e.g. one
+            -- feature's ClearStaged/commit must never touch the other's rows).
+            CREATE TABLE IF NOT EXISTS QualityStaging (
+                Id            INTEGER PRIMARY KEY,
+                FileRecordId  INTEGER NOT NULL REFERENCES FileRecords(Id),
+                Action        TEXT    NOT NULL,
+                TargetPath    TEXT,
+                Reason        TEXT,
+                Committed     INTEGER NOT NULL DEFAULT 0
+            );
             """;
         cmd.ExecuteNonQuery();
 

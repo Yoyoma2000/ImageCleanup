@@ -1,4 +1,6 @@
-using ImageCleanup.App.ViewModels;
+using ImageCleanup.App.Services;
+using ImageCleanup.App.Views;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Windows.Storage.Pickers;
@@ -7,11 +9,17 @@ namespace ImageCleanup.App;
 
 public sealed partial class MainWindow : Window
 {
-    public MainViewModel ViewModel { get; } = new();
+    /// <summary>Shared across every page via App.Services — folder selection lives here, in the shell.</summary>
+    public ScanSessionService ScanSession { get; }
 
     public MainWindow()
     {
+        ScanSession = App.Services.GetRequiredService<ScanSessionService>();
+
         this.InitializeComponent();
+
+        // Triggers OnNavSelectionChanged, which navigates the Frame to DuplicatesPage.
+        Nav.SelectedItem = Nav.MenuItems[0];
     }
 
     private async void OnSelectFolderClick(object sender, RoutedEventArgs e)
@@ -25,40 +33,22 @@ public sealed partial class MainWindow : Window
         var folder = await picker.PickSingleFolderAsync();
         if (folder is null) return;
 
-        await ViewModel.ScanFolderAsync(folder.Path);
+        await ScanSession.ScanFolderAsync(folder.Path);
     }
 
-    private async void OnCommitClick(object sender, RoutedEventArgs e)
+    private void OnNavSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
-        // Confirmation dialog
-        var confirm = new ContentDialog
+        if (args.SelectedItem is not NavigationViewItem item) return;
+
+        var pageType = item.Tag switch
         {
-            Title           = "Commit Changes",
-            Content         = $"This will move {ViewModel.StagedItems.Count} file(s) to the Recycle Bin or a new location. Continue?",
-            PrimaryButtonText   = "Commit",
-            CloseButtonText     = "Cancel",
-            XamlRoot        = this.Content.XamlRoot,
+            "Duplicates"   => typeof(DuplicatesPage),
+            "Quality"      => typeof(QualityPage),
+            "Organization" => typeof(OrganizationPage),
+            _              => typeof(DuplicatesPage),
         };
 
-        var choice = await confirm.ShowAsync();
-        if (choice != ContentDialogResult.Primary) return;
-
-        var result = await ViewModel.CommitStagedChangesAsync();
-
-        // Summary dialog
-        var summary = new ContentDialog
-        {
-            Title           = "Commit Complete",
-            Content         = result.Summary,
-            CloseButtonText = "OK",
-            XamlRoot        = this.Content.XamlRoot,
-        };
-        await summary.ShowAsync();
-    }
-
-    private void OnRemoveStagingClick(object sender, RoutedEventArgs e)
-    {
-        if (sender is Button btn && btn.Tag is int stagingId)
-            ViewModel.RemoveStagingEntry(stagingId);
+        if (ContentFrame.CurrentSourcePageType != pageType)
+            ContentFrame.Navigate(pageType);
     }
 }
