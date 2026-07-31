@@ -75,7 +75,7 @@ C#/.NET 9, WinUI 3 for UI.
 - Always parse DateTime from SQLite with DateTimeStyles.RoundtripKind.
 
 ## Status
-Sessions 1–23 complete. 185 tests passing (122 Core, 63 Data), 0 failures.
+Sessions 1–25 complete. 196 tests passing (122 Core, 74 Data), 0 failures.
 
 **All three core features are feature-complete and manually verified
 end-to-end on real data:**
@@ -89,8 +89,9 @@ end-to-end on real data:**
   (OrganizationPlanner) → TreeView preview with a checkbox per node
   (cascading selection via OrganizationSelectionNode) → real move
   execution of only the selected files, with a pre-execution move log
-  (OrganizationExecutor). No staging table of its own — see Known gaps
-  below.
+  (OrganizationExecutor) that automated undo (OrganizationUndoService) can
+  read back to reverse the batch. No staging table of its own — see Known
+  gaps below.
 
 All three share the same recursive, hidden/system/reparse-point-aware
 scan (ScanSessionService + Core.IO.ImageFileEnumerator) and the same
@@ -444,10 +445,11 @@ ThumbnailCache-backed preview thumbnails.
     Timestamp, DestinationRoot, and a Moves array of every planned
     {SourcePath, DestinationPath} pair (regardless of whether that
     particular move went on to succeed or fail — the log reflects the
-    plan, not the outcome). **This log is the only safety net for now —
-    there is no automated undo.** A human would need to read the log and
-    manually move files back; that's a known, explicit gap, not an
-    oversight (see Not yet started).
+    plan, not the outcome). **At the time this was written, this log was
+    the only safety net — no automated undo.** (Automated undo was added
+    in a later session — see OrganizationUndoService further down.) A
+    human could always read the log and manually move files back in the
+    meantime.
   - 6 new tests (temp-directory-based, no SQLite needed —
     OrganizationExecutor doesn't touch the DB at all): successful moves to
     the computed nested path, destination directories created as needed,
@@ -749,22 +751,123 @@ ThumbnailCache-backed preview thumbnails.
     (OrganizationSelectionNode) and the Data-layer executor filtering
     could be unit-tested directly; the WinUI wiring needs the manual
     verification checklist below.
+- Automated undo for Organization moves, reading back the move log
+  OrganizationExecutor already wrote. Added
+  Data.Services.OrganizationUndoService (same layer as OrganizationExecutor
+  — plain File.Move, no DB) — a stateless static class (unlike
+  OrganizationExecutor's constructor-configured logDirectory, Undo always
+  operates on a specific log path the caller already has, and ListMoveLogs
+  takes its directory as a parameter, so there's nothing to inject).
+  - `Undo(moveLogPath)` reads the log and, per entry, validates before
+    touching anything rather than assuming a clean reversible state:
+    checks whether the destination file still exists and whether the
+    original source location already has something at it, and only then
+    decides what to do. Five outcomes per entry (OrganizationUndoOutcome):
+    **Reversed** (normal case — destination exists, source empty, moved
+    back successfully), **AlreadyReversed** (destination gone AND the file
+    is already sitting at the source — a prior undo run, full or partial,
+    already handled this entry), **SkippedDestMissing** (destination gone
+    AND source also empty — nothing safe to do, file may have been moved/
+    deleted by something else since), **SkippedSourceOccupied**
+    (destination still has the file, but something else now occupies the
+    original source — refuses to overwrite it), and **Failed** (the normal
+    case's actual File.Move threw — permissions, in-use file, etc). This
+    is what makes re-running Undo against an already-fully-or-partially-
+    reversed log safe: AlreadyReversed is a distinct, expected, non-error
+    outcome, not something that surfaces as a failure or attempts a
+    redundant move. `OrganizationUndoResult` aggregates counts
+    (Reversed/AlreadyReversed/Skipped/Failed) plus a `Summary` string for
+    the same confirm/summary dialog pattern Duplicates/Quality/Organization
+    execution already use.
+  - `ListMoveLogs(logDirectory?)` enumerates `move-log_*.json` files in the
+    given directory (defaulting to OrganizationExecutor's own default),
+    parsing just enough of each (Timestamp, DestinationRoot, Moves.Count)
+    for a picker UI to show "logged when, how many files, to where" per
+    entry, newest-first. A corrupt/unreadable log file is skipped rather
+    than failing the whole listing — the same "one bad entry shouldn't
+    abort the batch" philosophy used throughout this codebase
+    (CommitService, OrganizationExecutor's own per-file try/catch).
+  - 8 new Data tests: full successful reversal, destination-missing skip,
+    source-occupied skip (confirms the occupying file is untouched and the
+    original moved file is NOT lost — still sitting at the destination),
+    idempotent re-run after a full reversal (AlreadyReversed, not an
+    error), re-run after a manually-simulated *partial* reversal (only the
+    still-outstanding entry gets reversed, the already-done one is
+    recognized and skipped), ListMoveLogs newest-first with correct file
+    counts, empty-directory listing, and a corrupt log file being skipped
+    rather than throwing.
+  - App layer: OrganizationViewModel gained `GetAvailableMoveLogsAsync()`
+    and `UndoMoveLogAsync(moveLogPath)` (mirrors ExecutePlanAsync's
+    IsIdle/StatusText/RefreshAsync-after pattern — undoing a move changes
+    disk state just as much as making one, so the same
+    ScanSessionService.RefreshAsync() call afterward applies). OrganizationPage
+    gained an "Undo a Previous Move…" button opening a ContentDialog with a
+    single-selection ListView of past logs (a lightweight custom picker,
+    not a general file-open dialog, since the logs live in a fixed
+    app-owned directory the user doesn't browse to), then the same
+    confirm-before/summary-after ContentDialog pattern as Organize Files —
+    the confirmation names the exact file count and explicitly calls out
+    that mismatched entries will be skipped, not overwritten.
+- Three bugs found in manual testing of the selective-execution/undo work
+  above, all fixed:
+  - **TreeView checkbox indentation regression**: adding the per-node
+    CheckBox pushed every row noticeably right of where it sat before
+    checkboxes existed. Root cause: WinUI's default CheckBox style
+    reserves a much larger touch-target box around the glyph than the
+    visible checkbox itself (sized for settings-page-style rows with a
+    text label, not a dense TreeView row with no CheckBox content) — the
+    TreeView's own per-level indent math never actually changed. Fixed by
+    setting `MinWidth="0" MinHeight="0" Padding="0"` on the CheckBox in
+    OrganizationPage.xaml, shrinking it to just its glyph footprint. Not
+    independently testable (WinUI layout/rendering) — needs the manual
+    checklist below.
+  - **Undo picker showed the wrong time** (a ~1am move displaying as
+    ~8:41am — a UTC-vs-Pacific-local offset). MoveLog.Timestamp is (and
+    remains) stored as `DateTime.UtcNow` — correct practice for a durable
+    record — but OrganizationPage's undo-picker ListView and confirmation
+    dialog were formatting it directly instead of converting first. Fixed
+    by calling `.ToLocalTime()` at the two display sites in
+    OrganizationPage.xaml.cs only — the stored log, OrganizationViewModel,
+    and OrganizationUndoService are all untouched, still entirely UTC.
+    Added a Data-layer regression test
+    (`ListMoveLogs_TimestampRoundTripsWithUtcKind_...`) confirming
+    System.Text.Json's serialize/deserialize round-trip preserves
+    `DateTimeKind.Utc` on `MoveLog.Timestamp` — that Kind is what makes
+    `.ToLocalTime()` correct rather than a silent no-op (Unspecified Kind
+    would make ToLocalTime() do nothing), so this guards the invariant the
+    actual (WinUI, untestable) display fix depends on.
+  - **Undo left empty Year/Month/Category folders behind**. Added
+    `OrganizationUndoService.CleanupEmptyDestinationFolders` — after a
+    file is successfully moved back (Reversed), and also when an entry
+    turns out to already be reversed (AlreadyReversed, since an
+    interrupted earlier undo run may have restored the file without ever
+    cleaning up its now-empty folder), walks up from the destination
+    file's containing folder deleting each one that's now empty, stopping
+    the instant a folder isn't empty (a partial undo leaving sibling files
+    behind must not have their shared folder removed) or as soon as the
+    log's own `DestinationRoot` would be next (the user-chosen root is
+    never deleted, empty or not). Best-effort: a folder that can't be
+    deleted (permission, transient lock) is left in place rather than
+    failing the undo over a cosmetic cleanup step. 2 new tests: full
+    reversal removes the empty Year/Month/Category chain but leaves the
+    destination root standing, and a partial reversal (one file
+    deliberately left un-reversed via a simulated SkippedSourceOccupied)
+    retains the shared Category folder since it's not actually empty.
 
 ### Known gaps / not yet started
 - **Video duplicate/near-duplicate detection — not started at all.** The
   app only scans image files today (see ScanSessionService's
   ImageExtensions list); no video sampling/hashing exists yet despite Core
   being scoped for it in the Architecture section below.
-- **Organization**: no automated undo — the move log
-  (%LOCALAPPDATA%\ImageCleanup\move-logs\*.json) is a human-readable manual
-  safety net, not an undo button. Per-file/per-node selective move now
-  exists (see Completed) but there is still no way to edit a
-  conflict-resolved target filename before executing. Relatedly, there is
-  still no staging table for Organization (OrganizationStagingRepository
-  remains Duplicates-only) — Organization executes directly from the
-  filtered plan after a confirm dialog rather than through a
-  staging/review cycle the way Duplicates/Quality work; whether
-  Organization ever needs staging is an open question, not a settled gap.
+- **Organization**: automated undo now exists (see Completed —
+  OrganizationUndoService) and per-file/per-node selective move now exists,
+  but there is still no way to edit a conflict-resolved target filename
+  before executing. Relatedly, there is still no staging table for
+  Organization (OrganizationStagingRepository remains Duplicates-only) —
+  Organization executes directly from the filtered plan after a confirm
+  dialog rather than through a staging/review cycle the way
+  Duplicates/Quality work; whether Organization ever needs staging is an
+  open question, not a settled gap.
 - **App still cannot build via CLI** — `dotnet build`/`dotnet run` fail
   with MSB4062 (PRI/MRT packaging task missing outside Visual Studio).
   Core/Data build and test fine via CLI; the App project requires Visual
@@ -1073,3 +1176,79 @@ When run:
   already investigated above. If you have a large enough real library,
   this is the number to report back — how much `wallClock=` dropped
   compared to the fully-sequential 193.5s baseline from two sessions ago.
+- **Organization — automated undo (new this session). Use the same kind of
+  disposable test folder as the move-execution checks above — this
+  exercises real File.Move calls both directions.**
+  - Run an "Organize Files…" move on a disposable test folder (partial
+    selection is fine — undo should only need to reverse whatever was
+    actually moved, per the move log). Click "Undo a Previous Move…" and
+    confirm a dialog lists that move (timestamp, file count, destination)
+    — if you've run more than one move, confirm the newest is listed
+    first.
+  - Select it and confirm — confirm the moved files land back at their
+    original source paths, and the confirmation dialog's file count
+    matched what was actually in that log (not the total plan size if you
+    only moved a selection).
+  - Re-run "Undo a Previous Move…" against the *same* log a second time
+    immediately after — confirm the summary reports everything as
+    "already reversed" (not "reversed" again, and not an error), and that
+    no files are moved, deleted, or duplicated by the second run.
+  - Simulate a partial-undo scenario: run a move with 2+ files, manually
+    move just one file back to its original location yourself (outside
+    the app, e.g. via File Explorer), then run "Undo a Previous Move…"
+    against that log — confirm only the *other*, still-outstanding file
+    gets moved back, and the one you manually restored is reported as
+    "already reversed" rather than erroring or double-moving it.
+  - Simulate a missing-destination scenario: after a move, manually
+    delete one of the moved files from its destination location, then run
+    undo against that log — confirm that entry is reported as skipped
+    (not reversed, not a crash) and the summary/skip reasoning is visible
+    somewhere reasonable (even if just in the aggregate count for now).
+  - Simulate a source-occupied scenario: after a move, manually create a
+    new/different file at one of the original source paths, then run undo
+    — confirm that entry is skipped, the newly-created file at the source
+    is untouched (not overwritten), and the originally-moved file is still
+    sitting at its destination (not lost in the attempt).
+  - Confirm Duplicates/Quality both reflect files being back in their
+    original location after a successful undo, without needing a manual
+    rescan (depends on UndoMoveLogAsync calling
+    ScanSessionService.RefreshAsync(), same as ExecutePlanAsync).
+  - Click "Undo a Previous Move…" when the move-logs directory is empty
+    (e.g. a fresh install, or after manually clearing
+    %LOCALAPPDATA%\ImageCleanup\move-logs\) — confirm a clear "no move
+    logs found" message rather than an empty/broken picker dialog.
+- **Three bug fixes from manual testing (new this session) — re-verify all
+  three, since they were reported from real usage, not hypothetical.**
+  - Checkbox indentation: open Organization on a real scanned folder and
+    compare row indentation to before this fix (or just judge by eye) —
+    every row (Year/Month/Category/File) should sit close to the left
+    edge with the checkbox neatly inline, not pushed noticeably right of
+    where the Duplicates/Quality tabs' own list rows sit.
+  - Undo picker timestamp: perform an Organize Files move, note your
+    system clock's local time at that moment, then open "Undo a Previous
+    Move…" — confirm the listed timestamp (and the one in the follow-up
+    confirmation dialog) matches your local wall-clock time, not a
+    UTC-offset time (e.g. a 1am local move should show ~1am, not ~8-9am on
+    US Pacific).
+  - Empty folder cleanup: perform a full Organize Files move into a fresh
+    destination folder, then fully undo it — confirm the Year/Month/
+    Category folders it created are gone afterward, but the destination
+    root folder you chose still exists (even though it may now be empty
+    itself). Then repeat with a partial scenario (deselect some files
+    before organizing, or simulate a skip during undo per the checklist
+    above) — confirm a folder that still has a file left in it is NOT
+    deleted.
+- **Settings page — scoped only, not yet implemented** (see chat history
+  for the full write-up if picking this up): would need a new page for
+  "Clear move history" (deletes `%LOCALAPPDATA%\ImageCleanup\move-logs\*`)
+  and "Clear cache" (deletes `%LOCALAPPDATA%\ImageCleanup\cache.db`,
+  forcing a full rescan next time). NavigationView already has
+  `IsSettingsVisible="False"` in MainWindow.xaml — flipping that on gets
+  the standard built-in gear-icon Settings entry for free instead of
+  adding a fourth custom NavigationViewItem, which is probably the more
+  idiomatic choice here. "Clear cache" is low-risk/recoverable (rescan
+  regenerates it); "Clear move history" is one-way and removes the undo
+  safety net for every past move, so it needs a distinctly stronger
+  warning than a routine confirm dialog — likely calling out how many log
+  files/moves would be lost, similar in spirit to the "not reversible
+  through the Recycle Bin" wording already used for Organization moves.

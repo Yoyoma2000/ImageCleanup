@@ -23,11 +23,15 @@
                            TextTrimming="CharacterEllipsis"
                            Opacity="0.85"/>
             </StackPanel>
-            <Button Content="Organize Files…"
-                    Click="OnExecuteClick"
-                    IsEnabled="{x:Bind ViewModel.CanExecutePlan, Mode=OneWay}"
-                    Style="{StaticResource AccentButtonStyle}"
-                    HorizontalAlignment="Left"/>
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <Button Content="Organize Files…"
+                        Click="OnExecuteClick"
+                        IsEnabled="{x:Bind ViewModel.CanExecutePlan, Mode=OneWay}"
+                        Style="{StaticResource AccentButtonStyle}"/>
+                <Button Content="Undo a Previous Move…"
+                        Click="OnUndoMoveClick"
+                        IsEnabled="{x:Bind ViewModel.IsIdle, Mode=OneWay}"/>
+            </StackPanel>
         </StackPanel>
 
         <!--
@@ -54,6 +58,19 @@
                                 actually decides the next value, deterministically
                                 collapsing that to a plain two-state toggle from
                                 the user's perspective; see OnNodeCheckBoxClick.
+
+                                MinWidth/MinHeight/Padding are zeroed out
+                                because the default CheckBox style reserves a
+                                much larger touch-target box around the glyph
+                                than the visible checkbox itself (sized for
+                                settings-page-style rows with a text label,
+                                not a dense TreeView row with no CheckBox
+                                content) — left as default, every row in the
+                                tree shifted noticeably right of where it sat
+                                before checkboxes were added, which read as an
+                                "indentation" regression even though the
+                                TreeView's own per-level indent math never
+                                changed.
                             -->
                             <CheckBox Grid.Column="0"
                                       IsThreeState="True"
@@ -61,6 +78,10 @@
                                       Click="OnNodeCheckBoxClick"
                                       Tag="{x:Bind}"
                                       VerticalAlignment="Center"
+                                      HorizontalAlignment="Left"
+                                      MinWidth="0"
+                                      MinHeight="0"
+                                      Padding="0"
                                       Margin="0,0,4,0"/>
                             <Image Grid.Column="1"
                                    Source="{x:Bind Thumbnail, Mode=OneWay}"

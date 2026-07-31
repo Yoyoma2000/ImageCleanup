@@ -1,5 +1,6 @@
 using ImageCleanup.App.Services;
 using ImageCleanup.App.ViewModels;
+using ImageCleanup.Data.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -105,6 +106,90 @@ public sealed partial class OrganizationPage : Page
         {
             Title           = "Organize Complete",
             Content         = $"{result.Summary}\n\nMove log: {result.MoveLogPath}",
+            CloseButtonText = "OK",
+            XamlRoot        = this.XamlRoot,
+        };
+        await summary.ShowAsync();
+    }
+
+    /// <summary>
+    /// Lets the user browse past move logs and reverse one — a ListView
+    /// inside a ContentDialog rather than a full picker control, since this
+    /// is a simple single-selection browse/pick from a handful of files, not
+    /// a general file-open dialog (the logs live in a fixed app-owned
+    /// directory, not somewhere the user browses to).
+    /// </summary>
+    private async void OnUndoMoveClick(object sender, RoutedEventArgs e)
+    {
+        var logs = await ViewModel.GetAvailableMoveLogsAsync();
+        if (logs.Count == 0)
+        {
+            var none = new ContentDialog
+            {
+                Title           = "Undo a Previous Move",
+                Content         = "No move logs found — nothing to undo.",
+                CloseButtonText = "OK",
+                XamlRoot        = this.XamlRoot,
+            };
+            await none.ShowAsync();
+            return;
+        }
+
+        var listView = new ListView
+        {
+            // MoveLog.Timestamp is stored as UTC (correct for a durable
+            // record — see OrganizationExecutor) — convert to local time
+            // only here, at display time, so the picker shows "1:23 AM"
+            // for a move made at 1:23 AM local rather than its UTC offset.
+            ItemsSource = logs
+                .Select(l => $"{l.Timestamp.ToLocalTime():yyyy-MM-dd HH:mm:ss} — {l.FileCount} file(s) — {l.DestinationRoot}")
+                .ToList(),
+            SelectionMode = ListViewSelectionMode.Single,
+            SelectedIndex = 0,
+        };
+
+        var pickDialog = new ContentDialog
+        {
+            Title             = "Select a Move to Undo",
+            Content           = listView,
+            PrimaryButtonText = "Undo Selected",
+            CloseButtonText   = "Cancel",
+            DefaultButton     = ContentDialogButton.Close,
+            XamlRoot          = this.XamlRoot,
+        };
+
+        var pickChoice = await pickDialog.ShowAsync();
+        if (pickChoice != ContentDialogResult.Primary || listView.SelectedIndex < 0)
+            return;
+
+        var selectedLog = logs[listView.SelectedIndex];
+
+        var confirm = new ContentDialog
+        {
+            Title             = "Undo Move",
+            Content           =
+                $"This will attempt to move {selectedLog.FileCount} file(s) back to their " +
+                $"original locations, reversing the move to:\n\n{selectedLog.DestinationRoot}\n" +
+                $"(logged {selectedLog.Timestamp.ToLocalTime():yyyy-MM-dd HH:mm:ss})\n\n" +
+                "Files that no longer exist at their moved location, or whose original " +
+                "location now has a different file, will be skipped rather than " +
+                "overwritten — see the summary after for exact counts. Continue?",
+            PrimaryButtonText = "Undo",
+            CloseButtonText   = "Cancel",
+            DefaultButton     = ContentDialogButton.Close,
+            XamlRoot          = this.XamlRoot,
+        };
+
+        var confirmChoice = await confirm.ShowAsync();
+        if (confirmChoice != ContentDialogResult.Primary)
+            return;
+
+        var result = await ViewModel.UndoMoveLogAsync(selectedLog.Path);
+
+        var summary = new ContentDialog
+        {
+            Title           = "Undo Complete",
+            Content         = result.Summary,
             CloseButtonText = "OK",
             XamlRoot        = this.XamlRoot,
         };

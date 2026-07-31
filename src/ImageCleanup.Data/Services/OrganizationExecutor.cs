@@ -8,8 +8,8 @@ namespace ImageCleanup.Data.Services;
 /// destinationRoot/Year/Month/Category/&lt;already-conflict-resolved
 /// filename&gt;. Before moving anything, writes a durable JSON move log
 /// listing every planned source→destination pair, so a record exists even
-/// if the app crashes mid-operation — that log is the safety net for now;
-/// there is no automated undo (see CLAUDE.md).
+/// if the app crashes mid-operation. See OrganizationUndoService for
+/// automated undo that reads this same log back.
 /// </summary>
 public sealed class OrganizationExecutor
 {

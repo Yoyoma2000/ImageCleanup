@@ -224,6 +224,44 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>Lists past move logs (newest first) so the Page can show a picker for Undo.</summary>
+    public async Task<IReadOnlyList<MoveLogSummary>> GetAvailableMoveLogsAsync() =>
+        await Task.Run(() => OrganizationUndoService.ListMoveLogs());
+
+    /// <summary>
+    /// Reverses a previously-executed move batch by reading the move log at
+    /// <paramref name="moveLogPath"/> — see OrganizationUndoService for the
+    /// per-entry validation (never overwrites, safe to re-run against an
+    /// already-partially-undone log). Caller (the Page) is responsible for
+    /// confirming with the user first, same as ExecutePlanAsync.
+    /// </summary>
+    public async Task<OrganizationUndoResult> UndoMoveLogAsync(string moveLogPath)
+    {
+        IsIdle = false;
+        StatusText = "Undoing a previous move…";
+        try
+        {
+            var result = await Task.Run(() => OrganizationUndoService.Undo(moveLogPath));
+
+            // Files may have moved back to CurrentFolder (or elsewhere) —
+            // refresh the shared scan session so every page reflects the
+            // restored disk state, same as ExecutePlanAsync does after a move.
+            await _scanSession.RefreshAsync();
+
+            StatusText = $"Undo complete — {result.Summary}";
+            return result;
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Undo failed: {ex.Message}";
+            return new OrganizationUndoResult();
+        }
+        finally
+        {
+            IsIdle = true;
+        }
+    }
+
     private HashSet<string> GetSelectedSourcePaths() =>
         _selectionRoots
             .SelectMany(r => r.SelectedFileNodes())
