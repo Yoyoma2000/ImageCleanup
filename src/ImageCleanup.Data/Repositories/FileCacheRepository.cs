@@ -25,81 +25,110 @@ public sealed class FileCacheRepository
         _connectionString = connectionString;
     }
 
-    public FileRecord? GetByPath(string path)
+    /// <summary>
+    /// Looks up a cached row by path. Pass <paramref name="connection"/> (and
+    /// optionally <paramref name="transaction"/>) to reuse an
+    /// externally-managed connection across many calls (e.g. a full scan) —
+    /// omit both to open-and-dispose a private connection per call, as before.
+    /// </summary>
+    public FileRecord? GetByPath(string path, SqliteConnection? connection = null, SqliteTransaction? transaction = null)
     {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = """
-            SELECT Id, FilePath, FileHash, PerceptualHash, FileSize, LastModified,
-                   Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot,
-                   LowDetail, SchemaVersion
-            FROM FileRecords
-            WHERE FilePath = $path
-            """;
-        cmd.Parameters.AddWithValue("$path", path);
+        var conn = connection ?? Open();
+        try
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = transaction;
+            cmd.CommandText = """
+                SELECT Id, FilePath, FileHash, PerceptualHash, FileSize, LastModified,
+                       Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot,
+                       LowDetail, SchemaVersion
+                FROM FileRecords
+                WHERE FilePath = $path
+                """;
+            cmd.Parameters.AddWithValue("$path", path);
 
-        using var reader = cmd.ExecuteReader();
-        return reader.Read() ? MapRow(reader) : null;
+            using var reader = cmd.ExecuteReader();
+            return reader.Read() ? MapRow(reader) : null;
+        }
+        finally
+        {
+            if (connection is null) conn.Dispose();
+        }
     }
 
-    public void Upsert(FileRecord record)
+    /// <summary>
+    /// Inserts or updates a cached row. Pass <paramref name="connection"/>
+    /// (and optionally <paramref name="transaction"/>) to reuse an
+    /// externally-managed connection/transaction across many calls (e.g. a
+    /// full scan) — omit both to open-and-dispose a private connection per
+    /// call (auto-committing), as before.
+    /// </summary>
+    public void Upsert(FileRecord record, SqliteConnection? connection = null, SqliteTransaction? transaction = null)
     {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO FileRecords
-                (FilePath, FileHash, PerceptualHash, FileSize, LastModified,
-                 Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot,
-                 LowDetail, SchemaVersion)
-            VALUES
-                ($filePath, $fileHash, $perceptualHash, $fileSize, $lastModified,
-                 $width, $height, $blurScore, $dateTaken, $cameraModel, $isScreenshot,
-                 $lowDetail, $schemaVersion)
-            ON CONFLICT(FilePath) DO UPDATE SET
-                FileHash       = excluded.FileHash,
-                PerceptualHash = excluded.PerceptualHash,
-                FileSize       = excluded.FileSize,
-                LastModified   = excluded.LastModified,
-                Width          = excluded.Width,
-                Height         = excluded.Height,
-                BlurScore      = excluded.BlurScore,
-                DateTaken      = excluded.DateTaken,
-                CameraModel    = excluded.CameraModel,
-                IsScreenshot   = excluded.IsScreenshot,
-                LowDetail      = excluded.LowDetail,
-                SchemaVersion  = excluded.SchemaVersion
-            RETURNING Id
-            """;
+        var conn = connection ?? Open();
+        try
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = transaction;
+            cmd.CommandText = """
+                INSERT INTO FileRecords
+                    (FilePath, FileHash, PerceptualHash, FileSize, LastModified,
+                     Width, Height, BlurScore, DateTaken, CameraModel, IsScreenshot,
+                     LowDetail, SchemaVersion)
+                VALUES
+                    ($filePath, $fileHash, $perceptualHash, $fileSize, $lastModified,
+                     $width, $height, $blurScore, $dateTaken, $cameraModel, $isScreenshot,
+                     $lowDetail, $schemaVersion)
+                ON CONFLICT(FilePath) DO UPDATE SET
+                    FileHash       = excluded.FileHash,
+                    PerceptualHash = excluded.PerceptualHash,
+                    FileSize       = excluded.FileSize,
+                    LastModified   = excluded.LastModified,
+                    Width          = excluded.Width,
+                    Height         = excluded.Height,
+                    BlurScore      = excluded.BlurScore,
+                    DateTaken      = excluded.DateTaken,
+                    CameraModel    = excluded.CameraModel,
+                    IsScreenshot   = excluded.IsScreenshot,
+                    LowDetail      = excluded.LowDetail,
+                    SchemaVersion  = excluded.SchemaVersion
+                RETURNING Id
+                """;
 
-        cmd.Parameters.AddWithValue("$filePath", record.FilePath);
-        cmd.Parameters.AddWithValue("$fileHash", record.FileHash);
-        cmd.Parameters.AddWithValue("$perceptualHash", record.PerceptualHash.HasValue
-            ? (object)(long)record.PerceptualHash.Value
-            : DBNull.Value);
-        cmd.Parameters.AddWithValue("$fileSize", record.FileSize);
-        cmd.Parameters.AddWithValue("$lastModified", record.LastModified.ToString("O"));
-        cmd.Parameters.AddWithValue("$width",
-            record.Width.HasValue ? (object)record.Width.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("$height",
-            record.Height.HasValue ? (object)record.Height.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("$blurScore",
-            record.BlurScore.HasValue ? (object)record.BlurScore.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("$dateTaken", record.DateTaken.HasValue
-            ? (object)record.DateTaken.Value.ToString("O")
-            : DBNull.Value);
-        cmd.Parameters.AddWithValue("$cameraModel",
-            record.CameraModel ?? (object)DBNull.Value);
-        cmd.Parameters.AddWithValue("$isScreenshot", record.IsScreenshot.HasValue
-            ? (object)(record.IsScreenshot.Value ? 1 : 0)
-            : DBNull.Value);
-        cmd.Parameters.AddWithValue("$lowDetail", record.LowDetail.HasValue
-            ? (object)(record.LowDetail.Value ? 1 : 0)
-            : DBNull.Value);
-        cmd.Parameters.AddWithValue("$schemaVersion", CurrentSchemaVersion);
+            cmd.Parameters.AddWithValue("$filePath", record.FilePath);
+            cmd.Parameters.AddWithValue("$fileHash", record.FileHash);
+            cmd.Parameters.AddWithValue("$perceptualHash", record.PerceptualHash.HasValue
+                ? (object)(long)record.PerceptualHash.Value
+                : DBNull.Value);
+            cmd.Parameters.AddWithValue("$fileSize", record.FileSize);
+            cmd.Parameters.AddWithValue("$lastModified", record.LastModified.ToString("O"));
+            cmd.Parameters.AddWithValue("$width",
+                record.Width.HasValue ? (object)record.Width.Value : DBNull.Value);
+            cmd.Parameters.AddWithValue("$height",
+                record.Height.HasValue ? (object)record.Height.Value : DBNull.Value);
+            cmd.Parameters.AddWithValue("$blurScore",
+                record.BlurScore.HasValue ? (object)record.BlurScore.Value : DBNull.Value);
+            cmd.Parameters.AddWithValue("$dateTaken", record.DateTaken.HasValue
+                ? (object)record.DateTaken.Value.ToString("O")
+                : DBNull.Value);
+            cmd.Parameters.AddWithValue("$cameraModel",
+                record.CameraModel ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("$isScreenshot", record.IsScreenshot.HasValue
+                ? (object)(record.IsScreenshot.Value ? 1 : 0)
+                : DBNull.Value);
+            cmd.Parameters.AddWithValue("$lowDetail", record.LowDetail.HasValue
+                ? (object)(record.LowDetail.Value ? 1 : 0)
+                : DBNull.Value);
+            cmd.Parameters.AddWithValue("$schemaVersion", CurrentSchemaVersion);
 
-        var id = cmd.ExecuteScalar();
-        if (id is long lid)
-            record.Id = (int)lid;
+            var id = cmd.ExecuteScalar();
+            if (id is long lid)
+                record.Id = (int)lid;
+        }
+        finally
+        {
+            if (connection is null) conn.Dispose();
+        }
     }
 
     /// <summary>
@@ -110,31 +139,43 @@ public sealed class FileCacheRepository
     ///   <item>The cached <c>SchemaVersion</c> is older than
     ///         <see cref="CurrentSchemaVersion"/> (new computed fields were added).</item>
     /// </list>
+    /// Pass <paramref name="connection"/> (and optionally
+    /// <paramref name="transaction"/>) to reuse an externally-managed
+    /// connection across many calls (e.g. a full scan) — omit both to
+    /// open-and-dispose a private connection per call, as before.
     /// </summary>
-    public bool NeedsRescan(string path, long fileSize, DateTime lastModified)
+    public bool NeedsRescan(string path, long fileSize, DateTime lastModified, SqliteConnection? connection = null, SqliteTransaction? transaction = null)
     {
-        using var connection = Open();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = """
-            SELECT FileSize, LastModified, SchemaVersion
-            FROM FileRecords
-            WHERE FilePath = $path
-            """;
-        cmd.Parameters.AddWithValue("$path", path);
+        var conn = connection ?? Open();
+        try
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = transaction;
+            cmd.CommandText = """
+                SELECT FileSize, LastModified, SchemaVersion
+                FROM FileRecords
+                WHERE FilePath = $path
+                """;
+            cmd.Parameters.AddWithValue("$path", path);
 
-        using var reader = cmd.ExecuteReader();
-        if (!reader.Read())
-            return true;
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read())
+                return true;
 
-        var cachedSize     = reader.GetInt64(0);
-        var cachedModified = DateTime.Parse(
-            reader.GetString(1), null,
-            System.Globalization.DateTimeStyles.RoundtripKind);
-        var cachedVersion  = reader.IsDBNull(2) ? 0 : reader.GetInt32(2);
+            var cachedSize     = reader.GetInt64(0);
+            var cachedModified = DateTime.Parse(
+                reader.GetString(1), null,
+                System.Globalization.DateTimeStyles.RoundtripKind);
+            var cachedVersion  = reader.IsDBNull(2) ? 0 : reader.GetInt32(2);
 
-        return cachedSize    != fileSize
-            || cachedModified != lastModified
-            || cachedVersion   < CurrentSchemaVersion;
+            return cachedSize    != fileSize
+                || cachedModified != lastModified
+                || cachedVersion   < CurrentSchemaVersion;
+        }
+        finally
+        {
+            if (connection is null) conn.Dispose();
+        }
     }
 
     public FileRecord? GetById(int id)

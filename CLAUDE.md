@@ -75,7 +75,7 @@ C#/.NET 9, WinUI 3 for UI.
 - Always parse DateTime from SQLite with DateTimeStyles.RoundtripKind.
 
 ## Status
-Sessions 1–19 complete. 155 tests passing (101 Core, 54 Data), 0 failures.
+Sessions 1–22 complete. 171 tests passing (112 Core, 59 Data), 0 failures.
 
 **All three core features are feature-complete and manually verified
 end-to-end on real data:**
@@ -521,6 +521,150 @@ ThumbnailCache-backed preview thumbnails.
   App-layer test project exists, and the bug is specifically about
   virtualized-container reuse timing) — verify manually per the checklist
   below.
+- Scan performance investigation (user-reported "scanning feels slow" on
+  larger folders). Added TEMPORARY per-step timing instrumentation to
+  ScanSessionService.ScanFiles (Stopwatch per step, aggregated across the
+  full scan, dumped via one `Debug.WriteLine` at the end prefixed
+  `[ScanPerf]` — not yet removed, still in place for before/after
+  comparison; remove/feature-flag once perf work is done). Confirmed the
+  scan pipeline is fully sequential (no parallelization at all — one
+  `foreach` over every file) and confirmed each cache-miss file was being
+  decoded from disk three separate times (DHasher.ComputeFromFile,
+  BlurDetector.ComputeBlurScore(path), LowDetailDetector.IsLowDetail(path)
+  each independently called `Image.Load<L8>(path)`), plus
+  FileCacheRepository opened a brand-new SqliteConnection for every single
+  NeedsRescan/GetByPath/Upsert call (2-3 fresh connection opens per file,
+  no shared connection or transaction).
+- Fixed the triple-decode: ScanSessionService.ScanFiles now calls
+  `Image.Load<L8>(path)` once per file and passes that shared instance to
+  DHasher.Compute/BlurDetector.ComputeBlurScore/LowDetailDetector.IsLowDetail's
+  existing pre-loaded-image overloads (no Core changes needed — those
+  overloads already existed, just weren't being used from the scan path).
+  4 new Core tests (SharedDecodeConsistencyTests) confirm byte-for-byte
+  identical results between the old per-call-decode path and the new
+  shared-decode path.
+- Fixed the SQLite connection/transaction pattern: FileCacheRepository's
+  GetByPath/Upsert/NeedsRescan gained optional trailing
+  `SqliteConnection?`/`SqliteTransaction?` parameters (default null —
+  every existing caller/test is unaffected and still gets a private
+  open-and-dispose connection per call, so this was purely additive, not
+  an API break). ScanSessionService.ScanFiles now opens one connection for
+  the whole scan and commits in batches of 500 files
+  (`SqliteBatchSize`) rather than one implicit transaction per file; a
+  failure mid-batch only loses that batch (the transaction is disposed
+  without committing in a `finally`, which rolls it back) — previously
+  committed batches are untouched. 4 new Data tests confirm: writes inside
+  an uncommitted transaction are visible to reads sharing the same
+  connection/transaction, an uncommitted transaction rolls back on
+  dispose, and a committed batch survives even when a later batch is
+  abandoned mid-transaction.
+- Real timing data from a 6183-file scan (193.5s total, still fully
+  sequential at that point) showed BlurDetector (69s, 36%) and
+  LowDetailDetector (58s, 30%) dominated — 66% combined, far more than the
+  decode step (43s, 22%) the previous fix targeted. Root cause: both
+  compute per-pixel statistics (Laplacian variance, pixel-value variance)
+  over the *full-resolution* decode, and real photos from phones are often
+  ~12MP (4032x3024). Neither signal actually needs full resolution — both
+  are about broad tonal/edge structure, not fine per-pixel detail. Fixed
+  by downscaling once (`ScanSessionService.MetricsMaxDimension = 400`,
+  same `ResizeMode.Max` + bicubic pattern already used by
+  Thumbnails/ThumbnailGenerator) and sharing that single downscaled image
+  between BlurDetector and LowDetailDetector; DHasher is unaffected and
+  still runs on the full-resolution decode (it already downsamples to 9x8
+  internally regardless of input size, so there was no cost to save
+  there). The resize is skipped entirely when the source is already
+  ≤400px on its longest side. Added a `downscale=` step to the
+  `[ScanPerf]` output so the next real scan shows this cost/savings
+  directly. 7 new Core tests (DownscaledMetricsConsistencyTests) using
+  synthetic high-resolution (2400x1600) images confirm: relative blur
+  ordering (sharp > medium > uniform) survives the downscale, and
+  LowDetail's boolean classification (solid color / noisy-near-uniform /
+  high-contrast-quadrants / full-range-gradient) is unchanged before vs.
+  after downscaling. Confirmed via grep that BlurScore has no absolute-
+  threshold consumer anywhere in the app (QualityReviewOrder only sorts it
+  relatively) and LowDetail's only consumer (SuggestionEngine) reads the
+  boolean, not the raw variance — so `LowDetailDetector.
+  DefaultVarianceThreshold` (50.0) did not need retuning against the
+  synthetic evidence gathered. **Caveat: this repo has no real photos to
+  validate against** — the synthetic-image tests are a reasonable proxy
+  (mirroring the same resize call ScanSessionService uses) but the actual
+  before/after BlurScore-ordering and LowDetail flags on Alan's real photo
+  library are still unverified; worth spot-checking a few known-blurry and
+  known-sharp real photos after this lands.
+- Investigated a `System.IO.IOException` reported in the Visual Studio
+  Output window immediately after a scan's `[ScanPerf]` line printed.
+  Concluded this is very likely a benign first-chance-exception
+  notification (Visual Studio's debugger reports every thrown exception in
+  Output, including ones caught immediately, not just unhandled ones —
+  same behavior called out for DbInitializer's PRAGMA-based column checks
+  under Conventions above) rather than a real bug: both
+  Data.Services.ThumbnailCache (which starts requesting thumbnails as soon
+  as ScanCompleted fires — the timing matches "right after the scan
+  completed") and ScanSessionService.ScanFiles' own per-file `catch { }`
+  already handle IOException gracefully (transiently-locked files,
+  concurrent thumbnail cache writes — see ThumbnailCache's existing
+  comments). Not fixed further since no crash/unhandled-exception dialog
+  was reported — only a first-chance notification. **Needs Alan to
+  confirm**: no unhandled-exception dialog appeared (that would mean a
+  real bug, not benign noise), and if the notification is too noisy while
+  debugging, Visual Studio's Debug > Windows > Exception Settings can
+  uncheck IOException without changing app behavior.
+- Parallelized the per-file scan pipeline. ScanSessionService.ScanFiles was
+  confirmed fully sequential (a single `foreach`); per-file work (decode,
+  downscale, SHA256, EXIF, DHash, blur, low-detail) is now run via
+  `Parallel.ForEach` capped at `MaxScanParallelism = Math.Min(Environment.
+  ProcessorCount, 8)` — capped rather than left unbounded since this is
+  also real disk I/O (every cache-miss file is opened/read at least twice:
+  SHA256 + image decode) and each concurrent file holds its own ImageSharp
+  decode buffer in memory; 8 is a reasonable ceiling regardless of core
+  count on typical consumer hardware. SQLite writes are not safely
+  concurrent (Microsoft.Data.Sqlite connections can't be shared across
+  threads), so Upserts stay single-threaded via a producer/consumer
+  pattern: parallel workers push completed FileRecords onto a
+  `BlockingCollection<FileRecord>` (bounded at 1000, giving natural
+  backpressure), and one dedicated writer — a real `Thread`, deliberately
+  not `Task.Run`/ThreadPool, so it can never be starved behind the
+  ThreadPool threads Parallel.ForEach is using — drains it and performs
+  the existing batched-transaction Upserts (unchanged 500-file batch size)
+  sequentially. NeedsRescan/GetByPath (reads) run per-worker on their own
+  short-lived connections rather than through the writer's shared
+  connection (which a second thread touching would violate
+  SqliteConnection's no-cross-thread-use rule); Microsoft.Data.Sqlite
+  applies an automatic busy-timeout, so a read racing the writer's
+  periodic commit just waits briefly instead of throwing. The method joins
+  the writer thread (and rethrows any write failure, wrapped, so it still
+  surfaces the same way an unexpected DB error did before) before
+  returning, so callers never see a FileRecord with an unset Id or read a
+  results set the cache hasn't caught up to yet. `results` collects via a
+  `ConcurrentBag<FileRecord>` (order doesn't matter — nothing downstream
+  depends on scan order) converted to a List at the end.
+  `[ScanPerf]`'s `total=` field is renamed `wallClock=` (what the user
+  actually experiences) and a new `aggregateCpuTime=` field reports the
+  sum of every per-step timer across all files/threads — explicitly
+  documented in the log line itself that this can now exceed `wallClock`
+  once work overlaps across threads, so the numbers don't read as a bug.
+  All per-step Stopwatch usage switched from single Stopwatch
+  instances (not thread-safe to share) to `Interlocked.Add`-accumulated
+  `long` tick counters, one local Stopwatch per file per step.
+  **Testing constraint**: ScanSessionService is App-layer/WinUI with no
+  test project (same constraint noted throughout this file — the App
+  can't be built or tested via CLI), so "parallel scan produces identical
+  results to sequential" can't be verified by directly testing ScanFiles.
+  Instead: (1) the per-file pure computations (hash/decode/blur/
+  low-detail) were already proven deterministic/side-effect-free by
+  existing Core tests, so which thread runs them doesn't affect their
+  output; (2) added a new Data test,
+  FileCacheRepositoryTests.ConcurrentReaders_WhileSingleWriterBatchesUpserts_ProducesCorrectFinalState,
+  that reproduces the exact concurrency shape ScanFiles now uses — 4
+  reader threads hammering NeedsRescan/GetByPath (each on its own
+  connection) while one writer thread batches Upserts through a shared
+  connection/transaction — and confirms the final DB state exactly
+  matches what a purely sequential write of the same records would
+  produce, with no exceptions from lock contention. This is the part of
+  the new concurrency that was actually at risk (SQLite access patterns);
+  the orchestration around it (Parallel.ForEach, BlockingCollection, the
+  writer Thread) is standard library-provided concurrency infrastructure,
+  not custom logic, so it wasn't treated as needing its own bespoke test.
 
 ### Known gaps / not yet started
 - **Video duplicate/near-duplicate detection — not started at all.** The
@@ -768,3 +912,33 @@ When run:
   rows (not just the first or last) to exercise different container-reuse
   positions, since the bug was intermittent/position-dependent rather
   than affecting every row every time.
+- Scan performance fixes: run a real scan (ideally the same real folder
+  used for the earlier 6183-file/193.5s timing) and paste the
+  `[ScanPerf]` Debug output line back — check that `decode=`,
+  `downscale=`, `dhash=`, `blur=`, `lowDetail=`, `needsRescan=`,
+  `getByPath=`, and `upsert=` all dropped noticeably vs. the prior
+  numbers, and that `wallClock=` (previously `total=`) is meaningfully
+  lower. Confirm Duplicates/Quality/Organization all still show correct
+  results afterward (BlurScore ordering in Quality should still look
+  blurriest-first by eye; Duplicates grouping/LowDetail exclusion should
+  look unchanged) — the underlying fixes only changed *how* these values
+  are computed, not what they mean, but this is the first real-photo
+  check since the values themselves changed scale. If IOException
+  first-chance notifications still appear in the Output window right
+  after a scan, confirm no unhandled-exception dialog also appeared (that
+  would mean the "benign" read above was wrong).
+- Parallelized scan pipeline: run a real scan and paste the new
+  `[ScanPerf]` line — `wallClock=` should now be substantially lower than
+  `aggregateCpuTime=` (they were equal, by definition, back when the
+  pipeline was sequential; a large gap between them is the actual proof
+  parallelism is working, and `maxDegreeOfParallelism=` in the same line
+  confirms what cap was used on your machine). Confirm file counts,
+  cacheHits/cacheMisses, and the actual scanned results (Duplicates
+  groups, Quality's list, Organization's tree) are unchanged from before
+  parallelization — same files, same computed values, just faster. Run
+  the same folder twice in a row (second run should be near-instant,
+  cache hits) and confirm no crash, no duplicate/missing files, and no
+  new IOException/SQLite-related first-chance exceptions beyond what was
+  already investigated above. If you have a large enough real library,
+  this is the number to report back — how much `wallClock=` dropped
+  compared to the fully-sequential 193.5s baseline from two sessions ago.

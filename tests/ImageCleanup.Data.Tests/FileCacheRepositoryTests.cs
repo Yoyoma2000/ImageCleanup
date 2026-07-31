@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ImageCleanup.Data.Models;
 using ImageCleanup.Data.Repositories;
 using ImageCleanup.Data.Tests.Helpers;
@@ -168,6 +169,182 @@ public sealed class FileCacheRepositoryTests : IDisposable
 
         // Both old schema AND changed size — should still be true
         Assert.True(Repo.NeedsRescan("/photos/double.jpg", 9999, modified));
+    }
+
+    // ── External connection/transaction overloads ───────────────────────
+    // These exercise the ScanSessionService full-scan pattern: one shared
+    // SqliteConnection + SqliteTransaction reused across many Upsert/
+    // NeedsRescan/GetByPath calls instead of a connection per call.
+
+    [Fact]
+    public void Upsert_WithExternalConnectionAndTransaction_CommitPersistsRow()
+    {
+        using var connection = new SqliteConnection(_db.ConnectionString);
+        connection.Open();
+        using (var tx = connection.BeginTransaction())
+        {
+            Repo.Upsert(MakeSampleRecord("/photos/tx-commit.jpg"), connection, tx);
+            tx.Commit();
+        }
+
+        var fetched = Repo.GetByPath("/photos/tx-commit.jpg");
+        Assert.NotNull(fetched);
+    }
+
+    [Fact]
+    public void Upsert_WithExternalTransaction_DisposedWithoutCommit_RollsBack()
+    {
+        using var connection = new SqliteConnection(_db.ConnectionString);
+        connection.Open();
+        using (var tx = connection.BeginTransaction())
+        {
+            Repo.Upsert(MakeSampleRecord("/photos/tx-rollback.jpg"), connection, tx);
+            // Deliberately not committed — simulates a crash/failure mid-batch.
+        }
+
+        var fetched = Repo.GetByPath("/photos/tx-rollback.jpg");
+        Assert.Null(fetched);
+    }
+
+    [Fact]
+    public void NeedsRescanAndGetByPath_WithExternalConnection_SeeUncommittedWritesInSameTransaction()
+    {
+        using var connection = new SqliteConnection(_db.ConnectionString);
+        connection.Open();
+        using var tx = connection.BeginTransaction();
+
+        Repo.Upsert(MakeSampleRecord("/photos/tx-visible.jpg", fileSize: 777), connection, tx);
+
+        // Not yet committed, but reads sharing the same connection+transaction
+        // must see it (this is how a batched scan avoids re-processing a file
+        // it already upserted earlier in the same uncommitted batch).
+        Assert.False(Repo.NeedsRescan("/photos/tx-visible.jpg", 777,
+            new DateTime(2024, 3, 10, 9, 0, 0, DateTimeKind.Utc), connection, tx));
+        Assert.NotNull(Repo.GetByPath("/photos/tx-visible.jpg", connection, tx));
+    }
+
+    [Fact]
+    public void BatchedTransactions_CommittedBatchSurvives_UncommittedBatchDoesNot()
+    {
+        // Simulates ScanSessionService.ScanFiles' batching: commit every N
+        // files, and confirm a failure partway through a later batch only
+        // loses that in-progress batch, not previously committed ones.
+        using var connection = new SqliteConnection(_db.ConnectionString);
+        connection.Open();
+
+        using (var batch1 = connection.BeginTransaction())
+        {
+            Repo.Upsert(MakeSampleRecord("/photos/batch1-a.jpg"), connection, batch1);
+            Repo.Upsert(MakeSampleRecord("/photos/batch1-b.jpg"), connection, batch1);
+            batch1.Commit();
+        }
+
+        using (var batch2 = connection.BeginTransaction())
+        {
+            Repo.Upsert(MakeSampleRecord("/photos/batch2-a.jpg"), connection, batch2);
+            // Simulate a crash before this batch commits.
+        }
+
+        Assert.NotNull(Repo.GetByPath("/photos/batch1-a.jpg"));
+        Assert.NotNull(Repo.GetByPath("/photos/batch1-b.jpg"));
+        Assert.Null(Repo.GetByPath("/photos/batch2-a.jpg"));
+    }
+
+    // ── Concurrency — mirrors ScanSessionService.ScanFiles' real pattern ──
+    // ScanFiles now runs per-file work (including NeedsRescan/GetByPath
+    // reads, each on its own short-lived connection) in parallel across
+    // worker threads, while a single dedicated writer thread performs all
+    // Upserts through one shared connection/transaction, batching commits.
+    // FileCacheRepository itself has no App-layer test project to exercise
+    // that orchestration directly, so this reproduces the same shape here:
+    // many concurrent readers hammering the DB while one writer batches
+    // writes, and confirms the result is exactly what a purely sequential
+    // write of the same records would have produced — no corruption, no
+    // lost writes, no unhandled exceptions from lock contention.
+
+    [Fact]
+    public void ConcurrentReaders_WhileSingleWriterBatchesUpserts_ProducesCorrectFinalState()
+    {
+        const int recordCount = 150;
+        const int batchSize   = 25;
+        const int readerThreads = 4;
+        const int readerRounds  = 3;
+
+        var expectedPaths = Enumerable.Range(0, recordCount)
+            .Select(i => $"/photos/concurrent-{i}.jpg")
+            .ToList();
+
+        using var writerConnection = new SqliteConnection(_db.ConnectionString);
+        writerConnection.Open();
+
+        Exception? writerException = null;
+        var writerThread = new Thread(() =>
+        {
+            try
+            {
+                var transaction = writerConnection.BeginTransaction();
+                var sinceCommit = 0;
+                for (int i = 0; i < recordCount; i++)
+                {
+                    Repo.Upsert(MakeSampleRecord(expectedPaths[i], fileSize: 1000 + i), writerConnection, transaction);
+                    if (++sinceCommit >= batchSize)
+                    {
+                        transaction.Commit();
+                        transaction.Dispose();
+                        transaction = writerConnection.BeginTransaction();
+                        sinceCommit = 0;
+                    }
+                }
+                transaction.Commit();
+                transaction.Dispose();
+            }
+            catch (Exception ex)
+            {
+                writerException = ex;
+            }
+        });
+
+        var readerExceptions = new ConcurrentBag<Exception>();
+        var readers = Enumerable.Range(0, readerThreads).Select(_ => new Thread(() =>
+        {
+            try
+            {
+                for (int round = 0; round < readerRounds; round++)
+                {
+                    foreach (var path in expectedPaths)
+                    {
+                        // Own short-lived connection per call — same as
+                        // ScanFiles' parallel workers, relying on
+                        // Microsoft.Data.Sqlite's automatic busy-timeout to
+                        // absorb any contention with the writer's commits
+                        // rather than throwing.
+                        Repo.NeedsRescan(path, 999_999, DateTime.UtcNow);
+                        Repo.GetByPath(path);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                readerExceptions.Add(ex);
+            }
+        })).ToList();
+
+        writerThread.Start();
+        foreach (var r in readers) r.Start();
+
+        writerThread.Join();
+        foreach (var r in readers) r.Join();
+
+        Assert.Null(writerException);
+        Assert.Empty(readerExceptions);
+
+        var all = Repo.GetAllRecords().ToList();
+        Assert.Equal(recordCount, all.Count);
+        foreach (var i in Enumerable.Range(0, recordCount))
+        {
+            var match = Assert.Single(all, r => r.FilePath == expectedPaths[i]);
+            Assert.Equal(1000 + i, match.FileSize);
+        }
     }
 
     // ── GetAllRecords ────────────────────────────────────────────────────
