@@ -78,20 +78,25 @@ C#/.NET 9, WinUI 3 for UI.
 Sessions 1–25 complete. 196 tests passing (122 Core, 74 Data), 0 failures.
 
 **All three core features are feature-complete and manually verified
-end-to-end on real data:**
+end-to-end on real data — this closes out the last remaining gap in the
+original three-pillar roadmap (Duplicates, Quality, Organization all
+complete):**
 - **Duplicates** — recursive scan → exact/near-dup detection
   (SuggestionEngine) → independent staging (OrganizationStagingRepository)
   → Recycle Bin commit (CommitService).
 - **Quality** — recursive scan → blurriest-first review (QualityReviewOrder)
   → independent staging (QualityStagingRepository) → Recycle Bin commit
   (CommitService).
-- **Organization** — recursive scan → Year/Month/Category planning
-  (OrganizationPlanner) → TreeView preview with a checkbox per node
-  (cascading selection via OrganizationSelectionNode) → real move
-  execution of only the selected files, with a pre-execution move log
-  (OrganizationExecutor) that automated undo (OrganizationUndoService) can
-  read back to reverse the batch. No staging table of its own — see Known
-  gaps below.
+- **Organization** — recursive scan → Year/Month/Category hierarchy
+  planning (OrganizationPlanner, with conflict-resolved filenames and
+  hybrid "01 - January"-style month folder naming) → TreeView preview with
+  a checkbox per node (Year/Month/Category/File) and cascading selection
+  (OrganizationSelectionNode) → real move execution of only the selected
+  files, with a pre-execution move log (OrganizationExecutor) → full
+  automated undo (OrganizationUndoService) that reverses a move log
+  per-entry (never overwriting, safe to re-run against an already
+  partially-undone log) and cleans up the empty Year/Month/Category
+  folders left behind. No staging table of its own — see Known gaps below.
 
 All three share the same recursive, hidden/system/reparse-point-aware
 scan (ScanSessionService + Core.IO.ImageFileEnumerator) and the same
@@ -855,19 +860,45 @@ ThumbnailCache-backed preview thumbnails.
     retains the shared Category folder since it's not actually empty.
 
 ### Known gaps / not yet started
-- **Video duplicate/near-duplicate detection — not started at all.** The
-  app only scans image files today (see ScanSessionService's
-  ImageExtensions list); no video sampling/hashing exists yet despite Core
-  being scoped for it in the Architecture section below.
-- **Organization**: automated undo now exists (see Completed —
-  OrganizationUndoService) and per-file/per-node selective move now exists,
-  but there is still no way to edit a conflict-resolved target filename
-  before executing. Relatedly, there is still no staging table for
-  Organization (OrganizationStagingRepository remains Duplicates-only) —
-  Organization executes directly from the filtered plan after a confirm
-  dialog rather than through a staging/review cycle the way
-  Duplicates/Quality work; whether Organization ever needs staging is an
-  open question, not a settled gap.
+**Current priority order for what's next**, now that Duplicates/Quality/
+Organization are all feature-complete:
+1. **Settings page** — scoped but not yet built. Planned actions: "Clear
+   Cache" (deletes `%LOCALAPPDATA%\ImageCleanup\cache.db`, forcing a full
+   rescan next time — low-risk/recoverable) and "Clear Move History"
+   (deletes `%LOCALAPPDATA%\ImageCleanup\move-logs\*.json` — one-way,
+   removes the undo safety net for every past move, so needs a
+   distinctly stronger warning than Clear Cache's routine confirm).
+   NavigationView already has `IsSettingsVisible="False"` in
+   MainWindow.xaml — flipping that on gets the standard built-in
+   gear-icon Settings entry for free rather than adding a fourth/fifth
+   custom NavigationViewItem. Paths confirmed via ScanSessionService/
+   OrganizationExecutor's own default-directory logic.
+2. **Localization** — not started. Plain-English text mode and Chinese
+   language support have been raised but no infrastructure (resource
+   files, a language switcher, string externalization) exists yet.
+3. **Theme toggle (light/dark)** — not started. The app currently follows
+   whatever WinUI/Windows defaults to; no in-app light/dark switch exists.
+4. **General UI polish** — not started. Specific items raised: per-page
+   accent coloring (currently uniform/black across Duplicates/Quality/
+   Organization rather than each page having its own accent) and a
+   sticky/always-visible "Select Folder" bar.
+5. **Distribution/.exe packaging** — not started (see the "No installer
+   or distribution path" gap below for the current constraint in detail).
+6. **Video duplicate/near-duplicate detection** — not started at all,
+   and deliberately deferred until after 1–5 above per current priority
+   order. The app only scans image files today (see ScanSessionService's
+   ImageExtensions list); no video sampling/hashing exists yet despite
+   Core being scoped for it in the Architecture section below.
+
+Other known gaps (not on the roadmap above, but still open):
+- **Organization**: even with selective move and automated undo both now
+  in place, there is still no way to edit a conflict-resolved target
+  filename before executing. Relatedly, there is still no staging table
+  for Organization (OrganizationStagingRepository remains
+  Duplicates-only) — Organization executes directly from the filtered
+  plan after a confirm dialog rather than through a staging/review cycle
+  the way Duplicates/Quality work; whether Organization ever needs
+  staging is an open question, not a settled gap.
 - **App still cannot build via CLI** — `dotnet build`/`dotnet run` fail
   with MSB4062 (PRI/MRT packaging task missing outside Visual Studio).
   Core/Data build and test fine via CLI; the App project requires Visual
