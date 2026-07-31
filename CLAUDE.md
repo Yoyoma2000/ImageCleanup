@@ -75,7 +75,7 @@ C#/.NET 9, WinUI 3 for UI.
 - Always parse DateTime from SQLite with DateTimeStyles.RoundtripKind.
 
 ## Status
-Sessions 1–22 complete. 171 tests passing (112 Core, 59 Data), 0 failures.
+Sessions 1–23 complete. 185 tests passing (122 Core, 63 Data), 0 failures.
 
 **All three core features are feature-complete and manually verified
 end-to-end on real data:**
@@ -86,10 +86,11 @@ end-to-end on real data:**
   → independent staging (QualityStagingRepository) → Recycle Bin commit
   (CommitService).
 - **Organization** — recursive scan → Year/Month/Category planning
-  (OrganizationPlanner) → TreeView preview → real move execution with a
-  pre-execution move log (OrganizationExecutor). v1 is all-or-nothing
-  (whole plan or nothing) with no staging table of its own — see Known
-  gaps below.
+  (OrganizationPlanner) → TreeView preview with a checkbox per node
+  (cascading selection via OrganizationSelectionNode) → real move
+  execution of only the selected files, with a pre-execution move log
+  (OrganizationExecutor). No staging table of its own — see Known gaps
+  below.
 
 All three share the same recursive, hidden/system/reparse-point-aware
 scan (ScanSessionService + Core.IO.ImageFileEnumerator) and the same
@@ -420,8 +421,9 @@ ThumbnailCache-backed preview thumbnails.
   DispatcherQueue.GetForCurrentThread() is still called once per node
   including every file node, which is a real if likely-minor per-node
   cost at large scale).
-- Organization move execution (v1: all files, no per-file selection yet —
-  a future enhancement). **This is the first feature in the app that moves
+- Organization move execution (v1: all files — per-file/per-node selection
+  added in a later session, see below). **This is the first feature in the
+  app that moves
   files outside Recycle Bin safety** — Delete actions elsewhere
   (Duplicates/Quality) go through the Recycle Bin via a delegate;
   Organization's Move is a real, non-reversible-through-Recycle-Bin
@@ -665,6 +667,88 @@ ThumbnailCache-backed preview thumbnails.
   the orchestration around it (Parallel.ForEach, BlockingCollection, the
   writer Thread) is standard library-provided concurrency infrastructure,
   not custom logic, so it wasn't treated as needing its own bespoke test.
+- Organization per-file/per-node selective execution, replacing v1's
+  all-or-nothing move. Added Core.Organization.OrganizationSelectionNode —
+  a mutable, WinUI-free tree mirroring OrganizationTreeNode 1:1 that
+  implements standard cascading-checkbox semantics without any UI
+  dependency, specifically so the cascade logic is unit-testable
+  independently of the TreeView control (10 new Core tests,
+  OrganizationSelectionNodeTests, covering default-all-selected,
+  cascade-down on Year/Month/Category/File, re-selection, and the
+  "deselecting one file doesn't uncheck its parent — parent goes
+  Indeterminate instead" guarantee at every level). Deliberately only
+  File-kind nodes store a real selection flag (`_isSelected`); every group
+  node (Year/Month/Category) derives `IsSelected`/`IsIndeterminate` live
+  from its children on every read rather than storing and syncing its own
+  copy — this is what makes "cascade down" (SetSelected recurses into
+  Children) and "recompute up" (ancestors just re-derive next time
+  they're read) trivially consistent with zero explicit
+  parent-notification bookkeeping inside OrganizationSelectionNode itself.
+  `CheckBoxState` (`bool?`) is null exactly when `IsIndeterminate`, for
+  direct ThreeState-CheckBox binding.
+  - Data.Services.OrganizationExecutor.Execute gained a third parameter,
+    `IReadOnlySet<string>? selectedSourcePaths = null` — when provided,
+    `ComputePlannedMoves` skips any PlannedFile whose SourcePath isn't in
+    the set before the move log is even written, so **the move log only
+    ever contains what was actually going to be attempted**, not the full
+    original plan. Omitting it (existing callers, existing tests) preserves
+    the original all-or-nothing behavior exactly — additive, not a
+    breaking change. 4 new Data tests cover: only-selected-files move,
+    move log contains only selected entries, an empty selection set moves
+    nothing but still writes a (empty) log, and `null` still moves
+    everything.
+  - App layer: OrganizationNodeViewModel now wraps an
+    OrganizationSelectionNode plus a `Parent` back-reference (set once at
+    construction, mirroring the tree's shape) and exposes `bool? IsChecked`
+    (a pure read of `CheckBoxState`) and `SetSelected(bool)`. Calling
+    SetSelected re-raises PropertyChanged(IsChecked) down through every
+    descendant (RefreshCheckedStateRecursively) and up through every
+    ancestor (NotifyAncestorsCheckedStateChanged via the Parent chain), so
+    every visible CheckBox in the tree — not just the one clicked —
+    reflects the change immediately, and invokes an `onSelectionChanged`
+    callback (threaded down to every node at construction, from
+    OrganizationViewModel) so the ViewModel's SelectedFileCount/
+    CanExecutePlan stay in sync without polling. OrganizationViewModel
+    builds one `OrganizationSelectionNode` tree per rebuild alongside the
+    existing OrganizationTreeNode tree (fresh plan → fresh selection,
+    defaulting to fully-selected, preserving "organize everything" for
+    anyone who never touches a checkbox) and exposes `PlannedFileCount`
+    (total) / `SelectedFileCount` (checked) / `GetSelectedSourcePaths()`
+    (case-insensitive HashSet, matching the existing path-comparison
+    convention elsewhere in this ViewModel). `CanExecutePlan` now gates on
+    `SelectedFileCount > 0` instead of the total plan count, so the
+    Execute button disables itself if everything is deselected.
+    ExecutePlanAsync passes `GetSelectedSourcePaths()` through to
+    `OrganizationExecutor.Execute`.
+  - OrganizationPage.xaml: added a `CheckBox` (`IsThreeState="True"`) as
+    the first column of every tree row (Year/Month/Category/File alike —
+    the same DataTemplate renders all kinds), bound `IsChecked` OneWay to
+    the ViewModel (never TwoWay) with an explicit `Click` handler
+    (`OnNodeCheckBoxClick`) instead. This is a deliberate WinUI-specific
+    workaround: `IsThreeState="True"` is required for the control to be
+    *capable* of rendering Indeterminate at all, but it also makes a raw
+    user click cycle through all three states by default
+    (unchecked→checked→indeterminate→unchecked), and Indeterminate must
+    stay a derived, read-only display state that a user can never click
+    their way into directly. The Click handler ignores whatever the
+    control's own internal three-state cycle just produced and instead
+    reads the ViewModel's last-known `IsChecked` (untouched by that
+    internal cycle, since the binding is OneWay) to decide
+    deterministically — anything not fully checked becomes fully checked;
+    fully checked becomes fully unchecked — then `SetSelected` immediately
+    re-notifies `IsChecked`, snapping the box's displayed value back to
+    the correct one regardless of what the click cycled it to. The
+    confirmation dialog (OnExecuteClick) now reads
+    `ViewModel.SelectedFileCount`/`PlannedFileCount` and shows
+    "N of M file(s)" when they differ, or just "M file(s)" when everything
+    is selected (unchanged wording from before this session).
+  - **Testing constraint, same as noted throughout this file**: WinUI
+    layer (OrganizationNodeViewModel's Parent-chain notification,
+    OrganizationPage's Click-handler workaround) has no test project and
+    can't be verified via CLI — only the pure Core cascade logic
+    (OrganizationSelectionNode) and the Data-layer executor filtering
+    could be unit-tested directly; the WinUI wiring needs the manual
+    verification checklist below.
 
 ### Known gaps / not yet started
 - **Video duplicate/near-duplicate detection — not started at all.** The
@@ -673,15 +757,14 @@ ThumbnailCache-backed preview thumbnails.
   being scoped for it in the Architecture section below.
 - **Organization**: no automated undo — the move log
   (%LOCALAPPDATA%\ImageCleanup\move-logs\*.json) is a human-readable manual
-  safety net, not an undo button. Also no per-file selective move yet — v1
-  is all-or-nothing (the whole plan executes, or none of it); no way to
-  select/deselect individual files or categories, or edit a
-  conflict-resolved target filename, before executing. Relatedly, there is
+  safety net, not an undo button. Per-file/per-node selective move now
+  exists (see Completed) but there is still no way to edit a
+  conflict-resolved target filename before executing. Relatedly, there is
   still no staging table for Organization (OrganizationStagingRepository
-  remains Duplicates-only) — v1 executes directly from the plan after a
-  confirm dialog rather than through a staging/review cycle the way
-  Duplicates/Quality work; whether Organization ever needs staging is an
-  open question, not a settled gap.
+  remains Duplicates-only) — Organization executes directly from the
+  filtered plan after a confirm dialog rather than through a
+  staging/review cycle the way Duplicates/Quality work; whether
+  Organization ever needs staging is an open question, not a settled gap.
 - **App still cannot build via CLI** — `dotnet build`/`dotnet run` fail
   with MSB4062 (PRI/MRT packaging task missing outside Visual Studio).
   Core/Data build and test fine via CLI; the App project requires Visual
@@ -904,6 +987,54 @@ When run:
   TreeView preview (before executing) still shows the Month node's label
   as just the word name ("January", not "01 - January") — the preview
   intentionally did not change.
+- **Organization — per-file/per-node selective execution (new this
+  session, and the highest-priority WinUI-specific check since none of
+  the checkbox/click-cycle behavior is CLI-testable). Use a disposable
+  test folder with several files across at least two months/categories,
+  same caution as above (real file moves, not Recycle Bin).**
+  - On first scanning, confirm every node (Year/Month/Category/File) shows
+    a checked CheckBox by default — this is the "preserve organize
+    everything" guarantee; nothing should start unchecked.
+  - Uncheck a single File node under a Category that has 2+ files —
+    confirm: that file's box is unchecked; the parent Category's box shows
+    the *indeterminate* dash/fill visual, not a plain unchecked box; the
+    Month and Year ancestors above it also show indeterminate, not
+    unchecked; a sibling Category untouched by this stays fully checked.
+  - Re-check that same File — confirm the Category/Month/Year all return
+    to fully checked (indeterminate clears) once every descendant is
+    checked again.
+  - Uncheck a whole Category node — confirm every File under it becomes
+    unchecked (cascade down), the Category itself shows plain unchecked
+    (not indeterminate — it's *fully* deselected), and Month/Year above it
+    show indeterminate (assuming other categories/months still have
+    checked content).
+  - Uncheck the top-level Year node — confirm every Month/Category/File
+    beneath it becomes unchecked, and the "Organize Files…" button
+    disables itself if this was the only Year in the tree (SelectedFileCount
+    would be 0).
+  - Click a checkbox repeatedly (5+ times) on the same node — confirm it
+    only ever alternates between fully-checked and fully-unchecked, and
+    never visibly "sticks" on the indeterminate dash from a direct user
+    click (indeterminate should only ever appear as a result of a
+    *descendant* being partially selected, never from clicking the node
+    itself an odd number of times) — this is the specific WinUI
+    ThreeState-CheckBox click-cycling workaround from this session; if it
+    ever shows indeterminate right after you click a node directly, that
+    workaround has a bug.
+  - With some files deselected, click "Organize Files…" — confirm the
+    confirmation dialog says "N of M file(s)" (not just "M file(s)").
+    With everything selected (no changes), confirm it says "M file(s)"
+    with no "of" wording (unchanged from before this session).
+  - After confirming, verify: only the checked files actually moved;
+    unchecked files are still sitting untouched in their original
+    location; the new move-log_*.json under
+    %LOCALAPPDATA%\ImageCleanup\move-logs\ lists *only* the files that
+    were checked and moved — not the full original plan.
+  - Re-scan (or switch tabs and back) after a partial-selection move —
+    confirm the previously-unchecked, unmoved files still appear in a
+    fresh Organization plan (since they're still on disk in their
+    original location) and default back to checked in the new plan
+    (selection state is per-rebuild, not persisted across rescans).
 - Quality ComboBox blanking fix: scan a folder with several files in
   Quality, stage a Delete on one, commit it so the list shrinks by one
   row, then check every remaining row's action ComboBox — confirm none of

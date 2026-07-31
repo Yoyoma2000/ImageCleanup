@@ -12,9 +12,11 @@ namespace ImageCleanup.App.ViewModels;
 /// Organization feature. Reads ScanSessionService's scanned files, runs
 /// OrganizationPlanner.BuildHierarchy off the UI thread (a real library can
 /// be thousands of files), and exposes the result as a tree of
-/// OrganizationNodeViewModel for a TreeView to bind to. v1: ExecutePlanAsync
-/// moves every file in the plan — no per-file selection/opt-out yet (a
-/// future enhancement).
+/// OrganizationNodeViewModel for a TreeView to bind to. Each node carries a
+/// checkable selection (default: everything checked, preserving the
+/// original "organize everything" behavior) via Core.Organization.
+/// OrganizationSelectionNode — ExecutePlanAsync only moves the files
+/// currently selected, not necessarily the whole plan.
 /// </summary>
 public sealed class OrganizationViewModel : INotifyPropertyChanged
 {
@@ -27,6 +29,9 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
 
     /// <summary>The raw Core plan behind the currently displayed tree — kept so ExecutePlanAsync has something to execute.</summary>
     private OrganizationPlan? _currentPlan;
+
+    /// <summary>One selection tree per root, mirroring RootNodes 1:1 — kept separately from the ViewModel tree so selection state can be queried (GetSelectedSourcePaths) without walking WinUI-aware objects.</summary>
+    private List<OrganizationSelectionNode> _selectionRoots = [];
 
     /// <summary>True once the user has explicitly picked a destination — stops auto-defaulting it on every rescan.</summary>
     private bool _destinationManuallySet;
@@ -55,8 +60,14 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
 
     private int _plannedFileCount;
 
-    /// <summary>Gates the Execute button: idle, a non-empty plan, and a chosen destination.</summary>
-    public bool CanExecutePlan => IsIdle && _plannedFileCount > 0 && !string.IsNullOrEmpty(DestinationFolder);
+    /// <summary>Total files in the current plan, regardless of selection — for "N of M" display.</summary>
+    public int PlannedFileCount => _plannedFileCount;
+
+    /// <summary>Files currently checked for execution across the whole tree.</summary>
+    public int SelectedFileCount => _selectionRoots.SelectMany(r => r.SelectedFileNodes()).Count();
+
+    /// <summary>Gates the Execute button: idle, at least one selected file, and a chosen destination.</summary>
+    public bool CanExecutePlan => IsIdle && SelectedFileCount > 0 && !string.IsNullOrEmpty(DestinationFolder);
 
     public ObservableCollection<OrganizationNodeViewModel> RootNodes { get; } = [];
 
@@ -105,6 +116,14 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
 
             _currentPlan      = plan;
             _plannedFileCount = plan.FileCount;
+
+            // A fresh plan means a fresh selection tree too — everything
+            // defaults to selected (OrganizationSelectionNode's default),
+            // matching the original "organize everything" behavior for
+            // anyone who doesn't touch the checkboxes.
+            _selectionRoots = tree.Select(t => new OrganizationSelectionNode(t)).ToList();
+            Notify(nameof(SelectedFileCount));
+            Notify(nameof(PlannedFileCount));
             Notify(nameof(CanExecutePlan));
 
             // Default the destination to the scanned source folder, but only
@@ -113,9 +132,15 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
             if (!_destinationManuallySet && _scanSession.CurrentFolder is not null)
                 DestinationFolder = _scanSession.CurrentFolder;
 
+            var onSelectionChanged = () =>
+            {
+                Notify(nameof(SelectedFileCount));
+                Notify(nameof(CanExecutePlan));
+            };
+
             RootNodes.Clear();
-            foreach (var node in tree)
-                RootNodes.Add(new OrganizationNodeViewModel(node));
+            foreach (var (node, selection) in tree.Zip(_selectionRoots))
+                RootNodes.Add(new OrganizationNodeViewModel(node, selection, onSelectionChanged));
 
             var monthCount = tree.Sum(year => year.Children.Count);
             StatusText = plan.FileCount == 0
@@ -150,13 +175,20 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// Moves every file in the current plan to DestinationFolder. v1 has no
-    /// per-file selection — the whole plan or nothing. Caller (the Page) is
-    /// responsible for confirming with the user first; this just executes.
+    /// Moves only the currently-selected/checked files in the plan to
+    /// DestinationFolder (default: every node starts checked, so this moves
+    /// everything unless the user has deselected something). Caller (the
+    /// Page) is responsible for confirming with the user first — including
+    /// showing the actual selected-vs-total count via SelectedFileCount/
+    /// PlannedFileCount — this just executes.
     /// </summary>
     public async Task<OrganizationExecutionResult> ExecutePlanAsync()
     {
         if (_currentPlan is null || DestinationFolder is null)
+            return new OrganizationExecutionResult();
+
+        var selectedSourcePaths = GetSelectedSourcePaths();
+        if (selectedSourcePaths.Count == 0)
             return new OrganizationExecutionResult();
 
         IsIdle = false;
@@ -166,7 +198,7 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
             var plan = _currentPlan;
             var destination = DestinationFolder;
 
-            var result = await Task.Run(() => _executor.Execute(plan, destination));
+            var result = await Task.Run(() => _executor.Execute(plan, destination, selectedSourcePaths));
 
             // Files have moved — refresh the shared scan session so every
             // page (including this one, via ScanCompleted) reflects the new
@@ -191,6 +223,12 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
             IsIdle = true;
         }
     }
+
+    private HashSet<string> GetSelectedSourcePaths() =>
+        _selectionRoots
+            .SelectMany(r => r.SelectedFileNodes())
+            .Select(n => n.SourcePath!)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
     private DateTime GetLastModified(string filePath) =>
         _lastModifiedByPath.TryGetValue(filePath, out var lm) ? lm : File.GetLastWriteTimeUtc(filePath);

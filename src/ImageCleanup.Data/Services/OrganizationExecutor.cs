@@ -23,9 +23,21 @@ public sealed class OrganizationExecutor
         Directory.CreateDirectory(_logDirectory);
     }
 
-    public OrganizationExecutionResult Execute(OrganizationPlan plan, string destinationRoot)
+    /// <summary>
+    /// Executes <paramref name="plan"/>. When <paramref name="selectedSourcePaths"/>
+    /// is provided, only files whose SourcePath is in that set are moved —
+    /// everything else in the plan is skipped entirely (not attempted, not
+    /// logged). Omit it (or pass null) to move every file in the plan, the
+    /// original all-or-nothing v1 behavior. The move log written before any
+    /// move is attempted reflects only what was actually going to be
+    /// attempted — i.e. already filtered — not the full original plan.
+    /// </summary>
+    public OrganizationExecutionResult Execute(
+        OrganizationPlan plan,
+        string destinationRoot,
+        IReadOnlySet<string>? selectedSourcePaths = null)
     {
-        var moves = ComputePlannedMoves(plan, destinationRoot);
+        var moves = ComputePlannedMoves(plan, destinationRoot, selectedSourcePaths);
 
         // Written before any move is attempted, deliberately — this is the
         // durable record a human could use to manually reverse the batch if
@@ -54,7 +66,10 @@ public sealed class OrganizationExecutor
         return result;
     }
 
-    private static List<PlannedMove> ComputePlannedMoves(OrganizationPlan plan, string destinationRoot)
+    private static List<PlannedMove> ComputePlannedMoves(
+        OrganizationPlan plan,
+        string destinationRoot,
+        IReadOnlySet<string>? selectedSourcePaths)
     {
         var moves = new List<PlannedMove>();
 
@@ -63,6 +78,9 @@ public sealed class OrganizationExecutor
         foreach (var category in month.Categories)
         foreach (var file in category.Files)
         {
+            if (selectedSourcePaths is not null && !selectedSourcePaths.Contains(file.SourcePath))
+                continue;
+
             var folderSegments = file.TargetFolder.Split('/', StringSplitOptions.RemoveEmptyEntries);
             var destinationPath = Path.Combine(
                 [destinationRoot, .. folderSegments, file.TargetFileName]);

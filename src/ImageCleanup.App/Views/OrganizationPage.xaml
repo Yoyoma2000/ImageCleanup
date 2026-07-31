@@ -45,26 +45,42 @@
             <TreeView.ItemTemplate>
                 <DataTemplate x:DataType="viewmodels:OrganizationNodeViewModel">
                     <TreeViewItem ItemsSource="{x:Bind Children}">
-                        <Grid ColumnDefinitions="Auto,*,Auto,Auto" VerticalAlignment="Center">
-                            <Image Grid.Column="0"
+                        <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" VerticalAlignment="Center">
+                            <!--
+                                IsThreeState is required so the box CAN render
+                                indeterminate, but that also makes a raw click
+                                cycle through three states by default — the
+                                Click handler (not the binding) is what
+                                actually decides the next value, deterministically
+                                collapsing that to a plain two-state toggle from
+                                the user's perspective; see OnNodeCheckBoxClick.
+                            -->
+                            <CheckBox Grid.Column="0"
+                                      IsThreeState="True"
+                                      IsChecked="{x:Bind IsChecked, Mode=OneWay}"
+                                      Click="OnNodeCheckBoxClick"
+                                      Tag="{x:Bind}"
+                                      VerticalAlignment="Center"
+                                      Margin="0,0,4,0"/>
+                            <Image Grid.Column="1"
                                    Source="{x:Bind Thumbnail, Mode=OneWay}"
                                    Width="40" Height="40"
                                    Margin="0,0,8,0"
                                    Stretch="Uniform"
                                    Visibility="{x:Bind ThumbnailVisibility}"/>
-                            <TextBlock Grid.Column="1"
+                            <TextBlock Grid.Column="2"
                                        Text="{x:Bind DisplayText}"
                                        VerticalAlignment="Center"
                                        TextWrapping="NoWrap"
                                        FontSize="13"/>
-                            <TextBlock Grid.Column="2"
+                            <TextBlock Grid.Column="3"
                                        Text="{x:Bind TargetFileName}"
                                        Opacity="0.7"
                                        FontSize="12"
                                        Margin="8,0,0,0"
                                        VerticalAlignment="Center"
                                        Visibility="{x:Bind TargetNameVisibility}"/>
-                            <Border Grid.Column="3"
+                            <Border Grid.Column="4"
                                     Background="{ThemeResource AccentFillColorDefaultBrush}"
                                     CornerRadius="4"
                                     Padding="6,2"

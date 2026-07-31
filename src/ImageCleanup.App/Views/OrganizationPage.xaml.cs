@@ -10,10 +10,11 @@ namespace ImageCleanup.App.Views;
 
 /// <summary>
 /// Organization: TreeView preview over OrganizationPlanner's proposed
-/// hierarchy, plus v1 move execution — moves every file in the plan (no
-/// per-file selection yet) to a chosen destination folder, behind an
+/// hierarchy, with a checkbox per node (Year/Month/Category/File) for
+/// selective execution, plus move execution — moves only the currently
+/// selected/checked files to a chosen destination folder, behind an
 /// explicit confirmation naming the real, non-Recycle-Bin nature of the
-/// operation.
+/// operation and the actual selected-vs-total file count.
 /// </summary>
 public sealed partial class OrganizationPage : Page
 {
@@ -37,6 +38,27 @@ public sealed partial class OrganizationPage : Page
             ViewModel.RequestThumbnailsFor(node);
     }
 
+    /// <summary>
+    /// A ThreeState CheckBox is required so a group node CAN render
+    /// indeterminate (some but not all descendants selected), but that also
+    /// makes a raw click cycle through THREE states by default (unchecked ->
+    /// checked -> indeterminate -> unchecked) — indeterminate should only
+    /// ever be a derived, read-only display state, never something a user
+    /// clicks their way into. This handler ignores whatever WinUI just
+    /// cycled the control's own IsChecked to, and instead reads the
+    /// ViewModel's last-known IsChecked (unaffected by that internal
+    /// three-state cycle, since the binding is OneWay) to decide
+    /// deterministically: anything not fully checked becomes fully checked;
+    /// fully checked becomes fully unchecked. SetSelected then re-notifies
+    /// IsChecked, which snaps the CheckBox's display back to the correct
+    /// value regardless of what the click cycled it to.
+    /// </summary>
+    private void OnNodeCheckBoxClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is CheckBox { Tag: OrganizationNodeViewModel node })
+            node.SetSelected(node.IsChecked != true);
+    }
+
     private async void OnSelectDestinationClick(object sender, RoutedEventArgs e)
     {
         var picker = new FolderPicker();
@@ -53,11 +75,17 @@ public sealed partial class OrganizationPage : Page
 
     private async void OnExecuteClick(object sender, RoutedEventArgs e)
     {
+        var selected = ViewModel.SelectedFileCount;
+        var total    = ViewModel.PlannedFileCount;
+        var countText = selected == total
+            ? $"{total} file(s)"
+            : $"{selected} of {total} file(s)";
+
         var confirm = new ContentDialog
         {
             Title             = "Organize Files",
             Content           =
-                $"This will MOVE files on disk to:\n\n{ViewModel.DestinationFolder}\n\n" +
+                $"This will MOVE {countText} on disk to:\n\n{ViewModel.DestinationFolder}\n\n" +
                 "This is a real file move, not a Recycle Bin operation — it is " +
                 "NOT reversible through the Recycle Bin. A move log will be " +
                 "written before anything is moved, in case you need to reverse " +

@@ -159,6 +159,82 @@ public sealed class OrganizationExecutorTests : IDisposable
         Assert.Matches(@"^01 - .+$", Path.GetFileName(monthDir));
     }
 
+    // ── selectedSourcePaths (selective execution) ───────────────────────
+
+    [Fact]
+    public void Execute_WithSelectedSourcePaths_OnlyMovesSelectedFiles()
+    {
+        var pathA = WriteFile("selected.jpg");
+        var pathB = WriteFile("unselected.jpg");
+        var plan = OrganizationPlanner.BuildHierarchy([
+            MakeRecord(pathA, new DateTime(2024, 3, 1)),
+            MakeRecord(pathB, new DateTime(2024, 3, 2)),
+        ]);
+
+        var executor = new OrganizationExecutor(_logDir);
+        var result = executor.Execute(plan, _destDir, new HashSet<string> { pathA });
+
+        Assert.Equal(1, result.Succeeded);
+        Assert.Equal(0, result.Failed);
+        Assert.False(File.Exists(pathA));      // moved
+        Assert.True(File.Exists(pathB));       // left in place, not even attempted
+        Assert.True(File.Exists(Path.Combine(_destDir, "2024", MonthFolder(3), "Photo", "selected.jpg")));
+    }
+
+    [Fact]
+    public void Execute_WithSelectedSourcePaths_MoveLogOnlyContainsSelectedFiles()
+    {
+        var pathA = WriteFile("selected.jpg");
+        var pathB = WriteFile("unselected.jpg");
+        var plan = OrganizationPlanner.BuildHierarchy([
+            MakeRecord(pathA, new DateTime(2024, 3, 1)),
+            MakeRecord(pathB, new DateTime(2024, 3, 2)),
+        ]);
+
+        var executor = new OrganizationExecutor(_logDir);
+        var result = executor.Execute(plan, _destDir, new HashSet<string> { pathA });
+
+        var log = JsonSerializer.Deserialize<MoveLog>(File.ReadAllText(result.MoveLogPath));
+        var entry = Assert.Single(log!.Moves);
+        Assert.Equal(pathA, entry.SourcePath);
+    }
+
+    [Fact]
+    public void Execute_WithEmptySelectedSourcePaths_MovesNothing_ButStillWritesLog()
+    {
+        var path = WriteFile("a.jpg");
+        var plan = OrganizationPlanner.BuildHierarchy([
+            MakeRecord(path, new DateTime(2024, 3, 1)),
+        ]);
+
+        var executor = new OrganizationExecutor(_logDir);
+        var result = executor.Execute(plan, _destDir, new HashSet<string>());
+
+        Assert.Equal(0, result.Succeeded);
+        Assert.Equal(0, result.Failed);
+        Assert.True(File.Exists(path)); // untouched
+        Assert.True(File.Exists(result.MoveLogPath));
+
+        var log = JsonSerializer.Deserialize<MoveLog>(File.ReadAllText(result.MoveLogPath));
+        Assert.Empty(log!.Moves);
+    }
+
+    [Fact]
+    public void Execute_WithNullSelectedSourcePaths_MovesEveryFile_SameAsOriginalAllOrNothingBehavior()
+    {
+        var pathA = WriteFile("a.jpg");
+        var pathB = WriteFile("b.jpg");
+        var plan = OrganizationPlanner.BuildHierarchy([
+            MakeRecord(pathA, new DateTime(2024, 3, 1)),
+            MakeRecord(pathB, new DateTime(2024, 3, 2)),
+        ]);
+
+        var executor = new OrganizationExecutor(_logDir);
+        var result = executor.Execute(plan, _destDir, selectedSourcePaths: null);
+
+        Assert.Equal(2, result.Succeeded);
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────
 
     /// <summary>Mirrors OrganizationPlanner's real folder-naming format ("01 - January") without hardcoding an English name, so this test stays correct on non-English machines.</summary>
