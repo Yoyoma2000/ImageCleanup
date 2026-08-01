@@ -23,8 +23,19 @@ C#/.NET 9, WinUI 3 for UI.
   IStagingRepository so CommitService's execution logic (Delete/Move,
   per-entry error handling) runs against either without duplication.
 - src/ImageCleanup.App — WinUI 3, MVVM, NavigationView + Frame page shell:
-  - MainWindow.xaml is the shell only — shared folder-selection toolbar +
-    NavigationView/Frame. It hosts no feature logic itself.
+  - MainWindow.xaml is the shell — shared folder-selection toolbar +
+    NavigationView/Frame, `PaneDisplayMode="Left"` + `IsPaneOpen="False"`
+    (pushes content when expanded rather than overlaying it — see Status
+    for why `LeftCompact` was rejected) with `Background` set explicitly
+    on both `NavigationView` and its `Frame` to avoid a theme-brush
+    mismatch during the pane animation. It hosts no feature logic itself.
+  - App.xaml — merges `XamlControlsResources` plus a **Dark-only**
+    `ResourceDictionary.ThemeDictionaries` override of the
+    `NavigationViewDefaultPaneBackground` theme resource (aliased to
+    `LayerFillColorDefaultBrush`), giving the pane a brighter elevation
+    in Dark theme. Deliberately not done via the `NavigationView.
+    PaneBackground` property — that reproducibly crashes the WinAppSDK
+    1.6.250205002 XAML compiler with no diagnostics (see Status).
   - Services/ScanSessionService — singleton (registered in App.xaml.cs via
     Microsoft.Extensions.DependencyInjection, resolved through the static
     `App.Services` provider). Owns the current folder + scanned FileRecords
@@ -32,19 +43,37 @@ C#/.NET 9, WinUI 3 for UI.
     string; exposes ScanFolderAsync/RefreshAsync and a ScanCompleted event
     for pages to rebuild derived state from. This is the single source of
     truth every feature page reads from — no page runs its own scan.
-  - Views/ — one Page per feature (DuplicatesPage and QualityPage
-    implemented; OrganizationPage is still a stub "coming soon"
-    placeholder), plus GroupDetailDialog (a ContentDialog, not a nav page).
+  - Localization/LocExtension — a custom WinUI `MarkupExtension`
+    (`{loc:Loc Key=...}`) resolving static XAML text through
+    `Data.Services.LocalizationService.Current` at parse time; see
+    Conventions below for the rule on adding new user-facing strings, and
+    Status for the full localization architecture (dictionary location,
+    key naming, fallback behavior).
+  - Views/ — one Page per feature (Duplicates/Quality/Organization/
+    Settings, all implemented), plus two dialogs: GroupDetailDialog
+    (Duplicates' multi-file comparison grid) and SinglePhotoDialog (a
+    shared "view one photo bigger" dialog reused by Quality and
+    Organization — takes a plain `(filePath, Func<byte[]?>)` rather than
+    binding to either caller's own ViewModel type).
   - ViewModels/ — one ViewModel per feature page (DuplicatesViewModel,
-    QualityViewModel) plus shared per-row view models (FileActionViewModel,
-    StagingEntryViewModel, DuplicateGroupViewModel, ThumbnailLoader) usable
-    by any future feature. FileActionViewModel has two constructors: the
-    original `(fileRecordId, filePath, isSuggested)` bool overload used by
-    Duplicates (defaults Keep/Delete), and a newer
+    QualityViewModel, OrganizationViewModel, SettingsViewModel) plus
+    shared per-row view models (FileActionViewModel, StagingEntryViewModel,
+    DuplicateGroupViewModel, OrganizationNodeViewModel, ThumbnailLoader,
+    ActionDisplay) usable by any future feature. FileActionViewModel has
+    two constructors: the original `(fileRecordId, filePath, isSuggested)`
+    bool overload used by Duplicates (defaults Keep/Delete), and a newer
     `(fileRecordId, filePath, initialAction, blurScore)` overload used by
-    Quality (defaults explicitly, e.g. "None", and optionally carries a
-    BlurScore for display — unused/null for Duplicates rows).
-- tests/ImageCleanup.Core.Tests — xUnit.
+    Quality (defaults explicitly, e.g. `ActionType.None`, and optionally
+    carries a BlurScore for display — unused/null for Duplicates rows).
+    `SelectedActionType` (a `Core.Grouping.ActionType` enum) is the stable
+    value business logic reads/compares; `AvailableActions`/
+    `SelectedActionIndex` are the localized-display-text/index pair the
+    ComboBox actually binds — see Status for why the two are split.
+- tests/ImageCleanup.Core.Tests, tests/ImageCleanup.Data.Tests — xUnit.
+  No test project exists for ImageCleanup.App (WinUI/XAML layer) — see
+  Notes for why, and Status for how App-layer changes get verified
+  instead (build-reaching-the-known-wall + Core/Data-level proxy tests
+  where a WinUI feature has a testable non-UI counterpart).
 
 ## Conventions
 - Core never references Data or App.
@@ -61,6 +90,17 @@ C#/.NET 9, WinUI 3 for UI.
   access) — after a green build, describe what should happen when run
   and defer actual UI verification (build success in Visual Studio,
   visual rendering, click-through of features) to Alan.
+- **Every new user-facing string must go through LocalizationService**
+  (`{loc:Loc Key=...}` in XAML, `LocalizationService.Current.GetString(...)`
+  in code-behind/ViewModels) with a matching key added to `dev.json`
+  (verbatim/technical wording), `en.json` (plain-language), and
+  `zh.json` (Simplified Chinese) — never a hardcoded literal, even a
+  short one. Verify key parity across all three files before considering
+  a change done (a Node one-liner comparing `Object.keys()` across the
+  three JSON files is the pattern used throughout this project's
+  history — no persisted test does this, since Data.Tests has no reason
+  to reference the App project's bundled Strings/ content). See Status
+  for the full architecture and fallback behavior.
 
 ## Commands
 - Build: dotnet build
@@ -71,16 +111,37 @@ C#/.NET 9, WinUI 3 for UI.
 ## Notes
 - App cannot be built via `dotnet build` CLI (MSB4062 — missing PRI/MRT DLL from plain SDK).
   Build the App project via Visual Studio; Core/Data/tests build fine from CLI.
+  (A `dotnet build src/ImageCleanup.App` from Claude Code still reliably
+  reaches this exact wall on every unrelated change — genuinely new/
+  different XAML compiler errors appearing *before* that wall are real
+  and worth investigating, as opposed to this expected one; see the
+  `PaneBackground` entry below for a concrete example of exactly that.)
 - ulong stored as signed long in SQLite; cast on read with (ulong)GetInt64().
 - Always parse DateTime from SQLite with DateTimeStyles.RoundtripKind.
+- **`NavigationView.PaneBackground` set directly (as a control property,
+  in XAML or code) reproducibly crashes the WinAppSDK 1.6.250205002 XAML
+  compiler** (`XamlCompiler.exe` exits 1, zero diagnostic output) —
+  confirmed by bisection, see Status for the full writeup. If the pane's
+  own fill needs to differ from the rest of `NavigationView`, override
+  the `NavigationViewDefaultPaneBackground` theme resource key in
+  `App.xaml`'s `ResourceDictionary.ThemeDictionaries` instead (a plain
+  resource-dictionary entry — no property-setter codegen involved, not
+  subject to this crash). Don't re-attempt the property directly without
+  confirming a newer WindowsAppSDK actually accepts it first.
 
 ## Status
-Sessions 1–25 complete. 196 tests passing (122 Core, 74 Data), 0 failures.
+212 tests passing (124 Core, 88 Data), 0 failures.
 
 **All three core features are feature-complete and manually verified
 end-to-end on real data — this closes out the last remaining gap in the
 original three-pillar roadmap (Duplicates, Quality, Organization all
-complete):**
+complete). Since then: Settings (theme + language + maintenance
+actions), full Light/Dark theme correctness (including NavigationView
+pane elevation), complete Dev/English/Chinese localization coverage,
+and a single-photo view for Quality/Organization have all also shipped
+— see the dedicated entries further down for each. Only Distribution/
+.exe packaging and video support remain from the original roadmap (see
+Known gaps below).**
 - **Duplicates** — recursive scan → exact/near-dup detection
   (SuggestionEngine) → independent staging (OrganizationStagingRepository)
   → Recycle Bin commit (CommitService).
@@ -1505,22 +1566,28 @@ ThumbnailCache-backed preview thumbnails.
     reference the App project's bundled `Strings/` content.
 
 ### Known gaps / not yet started
-**Current priority order for what's next**, now that Duplicates/Quality/
-Organization/Settings are all feature-complete and localization
-(Dev/English/Chinese, wording + infrastructure) is fully done:
-1. **General UI polish** — not started. Specific items raised: per-page
-   accent coloring (currently uniform/black across Duplicates/Quality/
-   Organization rather than each page having its own accent) and a
-   sticky/always-visible "Select Folder" bar.
-2. **Distribution/.exe packaging** — not started (see the "No installer
-   or distribution path" gap below for the current constraint in detail).
-3. **Video duplicate/near-duplicate detection** — not started at all,
-   and deliberately deferred until after 1–2 above per current priority
-   order. The app only scans image files today (see ScanSessionService's
-   ImageExtensions list); no video sampling/hashing exists yet despite
-   Core being scoped for it in the Architecture section below.
+**Current priority order for what's next** — only two items remain from
+the original roadmap now that Duplicates/Quality/Organization/Settings
+are all feature-complete, theme (Light/Dark, including pane elevation)
+is fully working, localization (Dev/English/Chinese) has complete
+coverage, and the single-photo view (Quality/Organization) closes out
+this round of UI polish:
+1. **Distribution/.exe packaging** — not started, and now the immediate
+   next priority (see the "No installer or distribution path" gap below
+   for the current constraint in detail).
+2. **Video duplicate/near-duplicate detection** — not started at all,
+   and deliberately deferred until after 1 above. The app only scans
+   image files today (see ScanSessionService's ImageExtensions list);
+   no video sampling/hashing exists yet despite Core being scoped for it
+   in the Architecture section below.
 
 Other known gaps (not on the roadmap above, but still open):
+- **General UI polish** — per-page accent coloring (currently uniform
+  across Duplicates/Quality/Organization rather than each page having
+  its own accent) and a sticky/always-visible "Select Folder" bar.
+  Neither is part of the original three-pillar roadmap and both are
+  lower priority than Distribution/Video above — revisit opportunistically,
+  not on the critical path.
 - **Organization**: even with selective move and automated undo both now
   in place, there is still no way to edit a conflict-resolved target
   filename before executing. Relatedly, there is still no staging table
