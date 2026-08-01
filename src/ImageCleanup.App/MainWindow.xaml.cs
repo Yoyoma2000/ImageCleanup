@@ -1,5 +1,6 @@
 using ImageCleanup.App.Services;
 using ImageCleanup.App.Views;
+using ImageCleanup.Data.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -18,8 +19,22 @@ public sealed partial class MainWindow : Window
 
         this.InitializeComponent();
 
+        // NavigationView's built-in Settings entry (IsSettingsVisible="True")
+        // is an implicit item WinUI constructs internally, not a normal
+        // NavigationViewItem declared in this XAML — it isn't materialized
+        // until the control has applied its template, which isn't
+        // guaranteed to have happened yet right after InitializeComponent,
+        // so this is set on Loaded rather than here directly.
+        Nav.Loaded += (_, _) => ApplySettingsItemLabel();
+
         // Triggers OnNavSelectionChanged, which navigates the Frame to DuplicatesPage.
         Nav.SelectedItem = Nav.MenuItems[0];
+    }
+
+    private void ApplySettingsItemLabel()
+    {
+        if (Nav.SettingsItem is NavigationViewItem settingsItem)
+            settingsItem.Content = LocalizationService.Current.GetString("Nav.Settings");
     }
 
     private async void OnSelectFolderClick(object sender, RoutedEventArgs e)

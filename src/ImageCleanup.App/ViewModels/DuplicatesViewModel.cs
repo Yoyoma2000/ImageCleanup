@@ -26,7 +26,7 @@ public sealed class DuplicatesViewModel : INotifyPropertyChanged
 
     // ── Observable state ─────────────────────────────────────────────────────
 
-    private string _statusText = "Select a folder above to scan for duplicates.";
+    private string _statusText = LocalizationService.Current.GetString("Duplicates.InitialStatus");
     public string StatusText
     {
         get => _statusText;
@@ -46,7 +46,7 @@ public sealed class DuplicatesViewModel : INotifyPropertyChanged
 
     public bool HasStagedItems => StagedItems.Count > 0;
     public Visibility StagingPanelVisibility => StagedItems.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-    public string StagedCountText => $"Review Staged Changes ({StagedItems.Count})";
+    public string StagedCountText => LocalizationService.Current.GetString("Common.StagedCountText", StagedItems.Count);
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -92,9 +92,9 @@ public sealed class DuplicatesViewModel : INotifyPropertyChanged
                 RequestThumbnail(fa);
                 if (!fa.IsSuggested)
                 {
-                    var sid = _stagingRepo.StageAction(fa.FileRecordId, "Delete", null, "Duplicate detected");
+                    var sid = _stagingRepo.StageAction(fa.FileRecordId, ActionType.Delete.ToStagingValue(), null, "Duplicate detected");
                     fa.StagingId = sid;
-                    var staged = new StagingEntryViewModel(sid, fa.FilePath, "Delete");
+                    var staged = new StagingEntryViewModel(sid, fa.FilePath, ActionType.Delete);
                     RequestThumbnail(staged);
                     StagedItems.Add(staged);
                 }
@@ -104,8 +104,8 @@ public sealed class DuplicatesViewModel : INotifyPropertyChanged
 
         NotifyStagingPanel();
         StatusText = scanned.Count == 0
-            ? "No image files found in that folder."
-            : $"{dupGroups.Count} duplicate group(s) found among {scanned.Count} file(s).";
+            ? LocalizationService.Current.GetString("Duplicates.NoFilesFound")
+            : LocalizationService.Current.GetString("Duplicates.GroupsFound", dupGroups.Count, scanned.Count);
     }
 
     // ── Staging callbacks ─────────────────────────────────────────────────────
@@ -114,21 +114,21 @@ public sealed class DuplicatesViewModel : INotifyPropertyChanged
     {
         var group = Groups.FirstOrDefault(g => g.FileActions.Contains(fa));
 
-        // Only one file per group may be "Keep" at a time — bump any other
+        // Only one file per group may be Keep at a time — bump any other
         // current keep-file back to Delete. This recurses into
         // OnFileActionChanged for that file (harmless: it resolves to
         // Delete, not Keep, so it can't cascade further).
-        if (group is not null && fa.SelectedAction == KeepSelector.KeepAction)
+        if (group is not null && fa.SelectedActionType == ActionType.Keep)
         {
             var conflicts = KeepSelector.ResolveKeepConflicts(
-                group.FileActions.Select(f => (f.FilePath, f.SelectedAction)),
+                group.FileActions.Select(f => (f.FilePath, f.SelectedActionType)),
                 fa.FilePath);
 
             foreach (var path in conflicts)
             {
                 var other = group.FileActions.FirstOrDefault(f =>
                     string.Equals(f.FilePath, path, StringComparison.OrdinalIgnoreCase));
-                if (other is not null) other.SelectedAction = "Delete";
+                if (other is not null) other.SelectedActionType = ActionType.Delete;
             }
         }
 
@@ -141,13 +141,13 @@ public sealed class DuplicatesViewModel : INotifyPropertyChanged
             fa.StagingId = null;
         }
 
-        // Create a staging row only for actionable choices — "Keep" and "None"
+        // Create a staging row only for actionable choices — Keep and None
         // both mean "do nothing to this file" and have no staged action.
-        if (fa.SelectedAction is "Delete" or "Move")
+        if (fa.SelectedActionType is ActionType.Delete or ActionType.Move)
         {
-            var sid = _stagingRepo.StageAction(fa.FileRecordId, fa.SelectedAction, null, "User staged");
+            var sid = _stagingRepo.StageAction(fa.FileRecordId, fa.SelectedActionType.ToStagingValue(), null, "User staged");
             fa.StagingId = sid;
-            var staged = new StagingEntryViewModel(sid, fa.FilePath, fa.SelectedAction);
+            var staged = new StagingEntryViewModel(sid, fa.FilePath, fa.SelectedActionType);
             RequestThumbnail(staged);
             StagedItems.Add(staged);
         }
@@ -181,13 +181,14 @@ public sealed class DuplicatesViewModel : INotifyPropertyChanged
     public async Task<CommitResult> CommitStagedChangesAsync()
     {
         IsIdle = false;
-        StatusText = "Committing changes…";
+        var loc = LocalizationService.Current;
+        StatusText = loc.GetString("Common.CommittingStatus");
         try
         {
             // Flush Move target paths from TextBoxes into staging rows
             foreach (var fa in Groups.SelectMany(g => g.FileActions))
             {
-                if (fa.SelectedAction == "Move" && fa.StagingId.HasValue)
+                if (fa.SelectedActionType == ActionType.Move && fa.StagingId.HasValue)
                     _stagingRepo.UpdateTargetPath(fa.StagingId.Value, fa.TargetPath);
             }
 
@@ -199,13 +200,13 @@ public sealed class DuplicatesViewModel : INotifyPropertyChanged
             await _scanSession.RefreshAsync();
 
             StatusText = result.Failed == 0
-                ? $"Done — {result.Succeeded} file(s) processed."
-                : $"Done — {result.Succeeded} succeeded, {result.Failed} failed.";
+                ? loc.GetString("Common.CommitDoneAll", result.Succeeded)
+                : loc.GetString("Common.CommitDonePartial", result.Succeeded, result.Failed);
             return result;
         }
         catch (Exception ex)
         {
-            StatusText = $"Commit failed: {ex.Message}";
+            StatusText = loc.GetString("Common.CommitFailedStatus", ex.Message);
             return new CommitResult();
         }
         finally

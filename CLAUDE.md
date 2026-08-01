@@ -935,21 +935,587 @@ ThumbnailCache-backed preview thumbnails.
     default styling, with no local override anywhere. XAML/resource-only
     — no ViewModel or logic changes, no new tests (nothing here is
     Core/Data-testable; see the manual verification checklist below).
+- **Localization infrastructure** — the mechanism only; full English/
+  Chinese wording is a follow-up pass (see Known gaps below). Three
+  language modes: Dev (today's exact wording, the default — anyone who
+  never touches this setting sees unchanged behavior), English (a
+  plain-language rewrite, not yet written), Chinese (a translation, not
+  yet written).
+  - **Where strings live**: `src/ImageCleanup.App/Strings/{dev,en,zh}.json`
+    — one flat `"Key.Path": "value"` JSON object per language, bundled as
+    app Content (`ImageCleanup.App.csproj` has a `<Content Include=
+    "Strings\*.json">` item with `CopyToOutputDirectory=PreserveNewest`),
+    not user data — deliberately not under `%LOCALAPPDATA%` the way
+    `settings.json` is, since these are app-authored translations, not
+    something a user edits. `dev.json` has 59 keys, extracted verbatim
+    from every static XAML string and Page-code-behind dialog string that
+    existed before this pass (button/header/placeholder text, dialog
+    Title/Content/button text — Content templates use `{0}`/`{1}`
+    positional placeholders for `string.Format`). `en.json`/`zh.json`
+    ship as empty `{}` placeholders — JSON has no comment syntax, so
+    "TODO, not yet translated" is recorded here in CLAUDE.md rather than
+    in the files themselves.
+  - **Key naming convention**: `Area.Thing` or `Area.DialogName.Part`,
+    dot-separated, PascalCase segments — e.g. `Duplicates.ViewGroupButton`,
+    `Organization.OrganizeConfirmDialog.Message`. Strings identical across
+    features (e.g. "Remove", "Destination path…", the commit-confirm
+    dialog trio shared by Duplicates/Quality) live under `Common.*`
+    instead of being duplicated per feature — deliberate, since Duplicates
+    and Quality's commit dialogs are behaviorally and textually identical
+    today; a feature-specific string that later needs to diverge just
+    gets its own key at that point, nothing here prevents that.
+  - **Data.Services.LocalizationService** (same layer/style as
+    SettingsService — constructor takes an optional directory override
+    for testability, defaults to `AppContext.BaseDirectory/Strings` for
+    real use). `SetLanguage(AppLanguage)` loads both the target language's
+    dictionary AND Dev's (always, for fallback). `GetString(key)` returns
+    the active language's value; if missing/empty, falls back to Dev's
+    value for that key; if even Dev doesn't have it, returns the raw key
+    as an absolute last resort (should never trigger once Dev is fully
+    populated — this only guards a typo'd key, not the expected
+    English/Chinese-not-translated-yet case, which is the Dev-fallback
+    path). `GetString(key, params object[] args)` wraps `string.Format`
+    for templated entries. A static `LocalizationService.Current`
+    property holds the DI-registered singleton — set once in
+    `App.xaml.cs.OnLaunched`, before any page is constructed — so XAML
+    markup extensions (built by the XAML parser with no DI access) and
+    static-context callers can reach it. Grepped to confirm the dictionary
+    files and code stay in sync: every `Key=`/`GetString("...")` reference
+    across the App project has a matching `dev.json` entry and vice versa
+    (59/59) — worth re-running that check (`grep` both sides, `comm -3`)
+    after adding any new string, since a typo'd key silently falls all
+    the way through to "show the raw key" rather than erroring at
+    compile time.
+  - **App.Localization.LocExtension** — a WinUI custom `MarkupExtension`
+    (`{loc:Loc Key=Some.Key}`) used for static Page XAML text. Chosen over
+    x:Bind-to-a-ViewModel-property-per-string specifically to keep Page
+    XAML readable — a markup extension is one attribute per string, not a
+    new `LocalizedFoo` property added to every ViewModel for every label.
+    Resolves via `LocalizationService.Current.GetString` **once, at
+    XAML-parse time** — this is the mechanism's one real limitation, see
+    below.
+  - **Live-apply vs. restart-required — genuinely different from theme,
+    not an oversight**: `{loc:Loc}` only evaluates once, when an element
+    is constructed, and every Page uses `NavigationCacheMode.Enabled`
+    (constructed once, reused for the app's lifetime) — so changing the
+    language in Settings does **not** update already-rendered Page text
+    without an app restart. Theme doesn't have this limitation because
+    `ElementTheme`/`RequestedTheme` is a live-cascading WinUI mechanism
+    with no once-only evaluation; there's no text equivalent short of
+    rebuilding every bound string's own change-notification, which is
+    exactly the "wall of binding boilerplate" this design deliberately
+    avoided. **What DOES update immediately, no restart**: every
+    `ContentDialog` in the app is constructed fresh in code-behind on
+    each show (not cached like Pages) and calls
+    `LocalizationService.Current.GetString(...)` directly in that
+    code-behind method — so a language change is visible in the very next
+    dialog shown, even though the page underneath it still shows the old
+    language. `SettingsViewModel.Language`'s setter calls
+    `LocalizationService.Current.SetLanguage(...)` immediately for
+    exactly this reason. `Settings.LanguageHint`'s wording reflects this
+    precisely ("Applies to new dialogs immediately; restart the app for
+    it to apply everywhere else.") rather than overstating what actually
+    happens.
+  - **SettingsPage**: added a Language section (RadioButtons: Dev/
+    English/Chinese) mirroring the Theme section's pattern exactly —
+    `SettingsViewModel.Language`/`LanguageIndex` mirror `Theme`/
+    `ThemeIndex`. Bug fixed in the same change: `Theme`'s setter
+    previously called `_settingsService.Save(new AppSettings { Theme =
+    _theme })` — constructing a **fresh** `AppSettings` on every save,
+    which would have silently reset `Language` back to its default the
+    next time `Theme` changed (and vice versa) once there were two
+    fields. `SettingsViewModel` now holds one `_settings` instance loaded
+    once at construction; both setters mutate that same instance and save
+    it whole.
+  - **Organization folder naming (Year/Month/Category) also respects the
+    language setting** — these are real on-disk folder names, not just UI
+    text (`OrganizationExecutor` writes files to
+    `<dest>/<Year>/<Month>/<Category>/...` using exactly the string
+    `OrganizationPlanner.BuildHierarchy` computed). `OrganizationPlanner.
+    BuildHierarchy` gained an optional `Func<MetadataCategory, string>?
+    categoryFolderName` parameter (same additive-optional-parameter
+    pattern as `OrganizationExecutor.Execute`'s `selectedSourcePaths`) —
+    omitted, it defaults to `category.ToString()`, the exact original
+    behavior, so every existing caller/test is unaffected.
+    `CategoryGroup.Label` changed from a computed `Category.ToString()`
+    property to a settable `init` property populated from the resolved
+    name, since a resolver can now return something other than the enum's
+    own name. `OrganizationViewModel.RebuildAsync` supplies
+    `ResolveCategoryFolderName`, which reads `Organization.FolderName.
+    Photo`/`Organization.FolderName.NoMetadata` through
+    `LocalizationService.Current` — under Dev language (the default)
+    this resolves to literally `"Photo"`/`"NoMetadata"`, so real on-disk
+    folder names are provably unchanged from before this pass.
+  - **Flagged, not solved — Windows folder-name safety for the actual
+    wording pass**: CJK characters themselves are perfectly valid in
+    Windows/NTFS folder names (this is not a blocker for Chinese
+    category names). The real constraint for whoever writes the
+    Chinese/English category-name wording next: avoid the characters
+    Windows forbids in any path segment (`< > : " / \ | ? *`), avoid a
+    value that's only whitespace or trailing dots/spaces (Windows trims
+    these and can produce a different or invalid name than intended), and
+    avoid exactly matching a reserved device name (`CON`, `PRN`, `AUX`,
+    `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`) case-insensitively — vanishingly
+    unlikely for real Chinese/English category words, but cheap to check
+    once actual wording is chosen. This wasn't guessed at or silently
+    worked around; flagging it here is the deliverable for this part of
+    the task.
+  - **Deliberately out of scope for this infrastructure pass** (flagged,
+    not silently skipped):
+    - **ViewModel-internal computed status strings** (e.g.
+      `ScanSessionService.StatusText`, `DuplicatesViewModel`/
+      `QualityViewModel`/`OrganizationViewModel`/`SettingsViewModel`'s
+      various `"Done — {0} file(s)..."`-style messages) were NOT routed
+      through LocalizationService. Item 2 of the task that built this
+      asked for "every current hardcoded XAML/code-behind string" —
+      read literally, ViewModels are neither; they're business logic
+      files, and these particular strings are woven through
+      success/failure branches with live-computed values rather than
+      being simple static literals. Touching them risked logic
+      regressions for a pass explicitly scoped as infrastructure-only.
+      Follow-up work.
+    - **`FileActionViewModel.AvailableActions`** ("None"/"Keep"/
+      "Delete"/"Move") were deliberately NOT localized, and this is a
+      real landmine worth understanding before anyone tries: these exact
+      strings are compared by value elsewhere as business logic (e.g.
+      `DuplicatesViewModel`/`QualityViewModel`'s `OnFileActionChanged`
+      checks `fa.SelectedAction is "Delete" or "Move"`, `KeepSelector`
+      compares against `"Keep"`), and `SelectedAction` is the literal
+      string bound `TwoWay` to the ComboBox. Translating the *display*
+      text without first separating it from the *value* compared in
+      logic would silently break Delete/Move/Keep detection the moment
+      a non-Dev language was active. Fixing this properly means
+      introducing a value/display-label split (e.g. the ComboBox binds
+      to a translated display string while `SelectedAction` keeps
+      comparing a stable, untranslated value) — real work, not a
+      dictionary-entry addition, so it's flagged here rather than
+      guessed at.
+  - 8 new Data tests: `LocalizationServiceTests` (Dev value returned
+    directly, English-key-present returns English, English-key-missing
+    falls back to Dev, Chinese's empty dictionary falls back to Dev for
+    every key, a key missing everywhere returns the raw key as last
+    resort, format-args templating, a missing Strings directory doesn't
+    throw, switching back to Dev after English returns Dev's value again)
+    plus 3 new `SettingsServiceTests` (Language round-trips alone, and
+    Theme+Language round-trip together — the latter is the regression
+    test for the "fresh AppSettings on save" bug described above).
+- **Action-string value/display split**, closing the gap flagged at the
+  end of the localization-infrastructure session above (translating
+  Delete/Keep/Move's display text would have silently broken the
+  business logic that string-compared against those exact words).
+  - Core.Grouping.ActionType — a new enum (`None`/`Keep`/`Delete`/`Move`)
+    is now the one stable, language-independent value everything compares
+    against. `KeepSelector.ResolveKeepConflicts` takes
+    `IEnumerable<(string FilePath, ActionType Action)>` instead of
+    `(string FilePath, string Action)` — the `KeepAction` string constant
+    is gone, replaced by comparing directly against `ActionType.Keep`.
+  - App.ViewModels.FileActionViewModel: `SelectedAction` (a string) is
+    replaced by `SelectedActionType` (`ActionType`) as the property every
+    other ViewModel now reads/sets — `DuplicatesViewModel.
+    OnFileActionChanged`, `QualityViewModel.OnFileActionChanged`,
+    `DuplicateGroupViewModel.Header`'s keep-file lookup, and both
+    ViewModels' Move-target-flush-before-commit checks all compare
+    `ActionType` values now, never a string. `AvailableActions` (bound to
+    the ComboBox's `ItemsSource`) is now the LOCALIZED DISPLAY text for
+    each action, in the same fixed order (`None`/`Keep`/`Delete`/`Move`)
+    used by the new `SelectedActionIndex` — the two arrays are built from
+    the same `ActionOrder` array so they can never drift out of sync.
+  - App.ViewModels.ActionDisplay — the one shared place that maps
+    `ActionType` to (a) `GetDisplayText`, the localized string shown to
+    the user (`Common.Action.None/Keep/Delete/Move` in the string
+    dictionaries — 4 new dev.json keys, added as part of this refactor,
+    not the later wording pass, since the value/display split itself
+    needed *some* Dev-language display text to exist), and (b)
+    `ToStagingValue()`, an extension method that's deliberately just
+    `ActionType.ToString()` — this is what still gets written to
+    `OrganizationStaging`/`QualityStaging`'s `Action` column and switched
+    on by `CommitService`, so the Data-layer persistence contract
+    ("Delete"/"Move" strings in SQLite) didn't need to change at all;
+    only the App-layer display path did. **Don't rename ActionType's
+    members** without checking whether that breaks this — it's an
+    implicit, ToString()-based contract, not a hardcoded mapping table.
+  - `StagingEntryViewModel`'s constructor now takes `ActionType` instead
+    of a string and stores `ActionDisplay.GetDisplayText(action)` as its
+    `Action` property — this closes a second leak of raw
+    "Delete"/"Move" text that was previously shown as-is in the staging
+    review panel, not just the ComboBox.
+  - `DuplicatesPage.xaml` and `GroupDetailDialog.xaml`'s action ComboBoxes
+    switched from `SelectedItem="{x:Bind SelectedAction, Mode=TwoWay}"`
+    to `SelectedIndex="{x:Bind SelectedActionIndex, Mode=TwoWay}"` — the
+    same pattern QualityPage already used. Necessary because
+    `AvailableActions` no longer holds a stable value SelectedItem could
+    match by equality (it holds translated display text now), and this
+    also incidentally fixes the container-recycling blank-ComboBox risk
+    those two views were never patched for (see Quality's original fix,
+    session history above) — SelectedIndex was already immune to that
+    class of bug.
+  - 9 new/updated Core tests: `KeepSelectorTests` converted from string
+    tuples to `ActionType` tuples (same 6 cases, same assertions — proves
+    the conflict-resolution behavior itself is unchanged, only its input
+    type changed), plus a new `ActionTypeLocalizationResilienceTests`
+    (`[Theory]`, 2 cases) that simulates the exact scenario this refactor
+    protects against: the same Keep/Delete selections made under two
+    completely different "display dictionaries" (English words vs.
+    deliberately unrelated gibberish/emoji text) resolve to the identical
+    conflict list either way, because `KeepSelector` only ever sees
+    `ActionType` — the display dictionary is asserted to actually differ
+    (so the test would have caught the old bug) but is never passed to
+    the detection logic at all.
+  - **Not App-layer-testable** (no test project exists for
+    `ImageCleanup.App` — same constraint as everywhere else in this
+    file): `FileActionViewModel`/`ActionDisplay`/the two ViewModels'
+    `OnFileActionChanged` themselves. Verified instead by (1) a full
+    `dotnet build` of the App project reaching its known MSB4062 wall
+    (PRI packaging, Visual-Studio-only) with zero C#/XAML compile errors
+    — proof every call site across `DuplicatesViewModel`/
+    `QualityViewModel`/`DuplicateGroupViewModel`/both XAML files compiles
+    against the new `ActionType`-based signatures — and (2) the Core-level
+    resilience test above, which models the App layer's exact
+    index-based selection pattern using only Core-testable types.
+- **English (plain-language) wording** for all 63 dictionary keys (59
+  from the original inventory + the 4 `Common.Action.*` keys added by
+  the value/display split above) — `en.json` is now fully populated;
+  `dev.json` was NOT touched (still today's exact technical wording,
+  verified key-for-key identical to before this pass) and `zh.json` is
+  still empty, pending a follow-up Chinese-translation prompt. Full
+  before/after string list was reported back to Alan for review, not
+  reproduced here — read `en.json` directly for the current wording, and
+  git blame/history for what changed if that's ever needed later. Two
+  choices flagged in that report for confirmation rather than assumed:
+  - **`Organization.FolderName.NoMetadata`**: proposed "Other" (the
+    English value now in `en.json`) as a plain alternative to the
+    developer-facing "NoMetadata" — this is a REAL folder name written
+    to disk by `OrganizationExecutor` under English mode, not just
+    display text (see the Organization folder-naming hook from the
+    localization-infrastructure session above), so this choice has
+    functional consequences beyond wording and should be confirmed
+    before anyone relies on it. "Unsorted" was considered and rejected
+    as the proposal — these files ARE still organized by Year/Month, just
+    lacking EXIF metadata, so "Unsorted" could misleadingly imply no
+    organization happened at all.
+  - **`Settings.Language.Dev`**: the radio-button label for switching
+    *back* to Dev/technical wording — proposed "Technical (Default)"
+    rather than literally "Dev", since "Dev" itself is developer jargon
+    a non-technical user picking from this exact list wouldn't
+    necessarily parse correctly.
+  - General approach used throughout: "Commit"/"Commit Changes" →
+    "Apply"/"Apply Changes"; BlurScore's tooltip reframed as photo
+    sharpness rather than showing/naming the raw technical score;
+    "Cache" avoided entirely in Settings' Clear Cache wording ("Clear
+    What's Been Scanned"); confirmation/warning dialogs (Organize,
+    Undo, Clear Move History) were rewritten in plain sentences but kept
+    every piece of safety information the technical wording conveyed
+    (not reversible via Recycle Bin, a record is kept, what gets
+    skipped and why) — plain language, not watered down.
+- **English wording review pass** (`en.json` only — `dev.json`'s
+  existing values and `zh.json` untouched again, same rule as before).
+  Six changes from Alan's review of the pass above:
+  - `Organization.ChooseDestinationButton`: "Choose Where to Put
+    Them…" → "Destination Folder…"
+  - `Organization.UndoMoveButton` AND `Organization.NoMoveLogsDialog.Title`
+    (both previously read "Undo an Earlier Organize", with/without the
+    button's ellipsis): "Undo an Action…" / "Undo an Action"
+  - `Organization.OrganizeFilesButton` (the button only — the confirm
+    dialog's title and primary button were left as "Organize My Photos"
+    / "Yes, Organize Them"): "Organize My Photos…" → "Organize…"
+  - `Settings.ClearCacheButton` and `Settings.ClearCacheConfirmDialog.Title`:
+    "Clear What's Been Scanned" → "Clear Previous Scans"
+  - **The near-duplicate group label and the "staged changes" panel
+    header were never actually in the dictionary** — both were
+    ViewModel-computed strings (`DuplicateGroupViewModel.Header`,
+    `DuplicatesViewModel`/`QualityViewModel.StagedCountText`) explicitly
+    called out as deliberately out-of-scope in the original
+    localization-infrastructure session ("ViewModel-internal computed
+    status strings... item 2 said XAML/code-behind, not ViewModel
+    logic"). Alan's review specifically asked for both to be fixed in
+    English mode, so this pass brought them into the dictionary (5 new
+    keys, added to **both** `dev.json` — verbatim current wording, e.g.
+    `Duplicates.GroupKind.NearDuplicate` = "near-dup" — and `en.json`):
+    `Common.StagedCountText` ("Review Staged Changes ({0})" dev → "Changes
+    to Make ({0})" en — avoids "staged" per the request, without
+    adopting one rigid replacement everywhere, per the request's own
+    guidance), `Duplicates.GroupKind.Exact`/`.NearDuplicate` ("exact"/
+    "near-dup" dev → "Exact match"/"Near duplicate" en — Exact was
+    reworded too for consistency, not explicitly requested but left
+    inconsistent otherwise), `Duplicates.NoneSelected` ("none selected",
+    unchanged in English — already plain), and `Duplicates.GroupHeader`
+    (the template combining all of the above: "{0} files ({1}) — Keep:
+    {2}" dev → "{0} photos ({1}) — Keep: {2}" en).
+  - `DuplicateGroupViewModel.Header`, `DuplicatesViewModel.
+    StagedCountText`, and `QualityViewModel.StagedCountText` now read
+    through `LocalizationService.Current.GetString` instead of a raw
+    C# string interpolation — same pattern as everywhere else, no other
+    behavior change. This precedent (a ViewModel status string getting
+    pulled into the dictionary after all, once a concrete user-facing
+    need showed up) is worth remembering if more of the still-deferred
+    ViewModel status/summary strings need the same treatment later.
+- **Layout bug fix**: QualityPage's per-row action ComboBox was missing
+  `VerticalAlignment="Center"` (DuplicatesPage's equivalent ComboBox has
+  always had it). Without it, the ComboBox defaults to Stretch and grows
+  to match the row's 64px thumbnail height instead of centering
+  alongside the single-line file path/BlurScore text — visually
+  misaligned. Fixed by adding the same `VerticalAlignment="Center"`
+  DuplicatesPage already uses. XAML-only, not CLI-verifiable — see the
+  manual verification checklist below.
+- **Chinese (Simplified) translation — localization is now complete
+  across all three languages (Dev/English/Chinese).** `zh.json` filled
+  in for all 68 keys (confirmed key-for-key identical to `en.json` and
+  `dev.json` — no drift in either direction), translated from `en.json`'s
+  plain-language English (not `dev.json`'s technical wording), in
+  everyday Simplified Chinese vocabulary aimed at a non-technical older
+  adult — standard UI conventions used where they exist (确定/取消 for
+  OK/Cancel, matching how Windows itself labels those buttons) rather
+  than literal/formal translations. `dev.json` and `en.json` were not
+  touched.
+  - **Folder-name safety, confirmed rather than assumed**:
+    `Organization.FolderName.Photo` → "照片", `.NoMetadata` → "其他" —
+    both are real on-disk folder names under Chinese mode (same
+    `OrganizationViewModel.ResolveCategoryFolderName` hook noted in the
+    localization-infrastructure session), and both were checked against
+    Windows' forbidden-path-character set (`< > : " / \ | ? *`),
+    trailing dots/spaces, and reserved device names — clean on all three;
+    Simplified Chinese characters themselves are unrestricted in NTFS/
+    Windows folder names. `Duplicates.GroupKind.Exact`/`.NearDuplicate`
+    were checked too (per the same instruction) and confirmed **not** to
+    feed any folder/filename logic — grepped for their only call site
+    (`DuplicateGroupViewModel.Header`, pure display text) and confirmed
+    `OrganizationViewModel.ResolveCategoryFolderName` only ever reads the
+    two `Organization.FolderName.*` keys, nothing from `Duplicates.*` —
+    so no folder-name-safety review was needed there, just translation.
+  - **Template/placeholder grammar**: `Common.StagedCountText`
+    ("Changes to Make ({0})") became "待处理的更改（{0}）" — kept the
+    count in the same trailing-parenthetical position as English, which
+    reads naturally in Chinese without needing to relocate {0} for
+    grammar (unlike some other templates, e.g.
+    `Organization.CountOfTotalFiles`, "{0} of {1} photo(s)", which DOES
+    reorder — Chinese naturally phrases "M of N" as "N 张照片中的 M
+    张", so `{1}` appears before `{0}` in the Chinese template; both
+    positional arguments are still supplied in the original {0},{1}
+    order by the calling code — only the template string's argument
+    *order of reference* changed, which `string.Format` supports
+    natively).
+  - No strings were flagged as lacking a natural Chinese equivalent —
+    every key had a plain, idiomatic translation available.
+  - No code changes were needed for this pass (translation is pure
+    content, same dictionary-loading/fallback mechanism built in the
+    localization-infrastructure session already handles a third
+    language with zero additional wiring) — `dotnet build`/`dotnet test`
+    were run to confirm zero regressions, not because any regression was
+    expected.
+- **Two bugs found in Chinese-mode review, both fixed:**
+  - **Incomplete localization coverage** — a full grep-style pass (every
+    XAML `Content`/`Text`/`Header`/`Title`/`PlaceholderText`/button-text
+    attribute, every code-behind dialog string, every ViewModel
+    `StatusText` default/assignment) found 33 more strings never routed
+    through `LocalizationService`, all in previously-deferred territory
+    (see the localization-infrastructure session's explicit "ViewModel-
+    internal computed status strings... out of scope" carve-out — this
+    session closes that gap for good, since raw English leaking through
+    in Chinese mode makes that carve-out no longer acceptable). All 33
+    added to `dev.json`/`en.json`/`zh.json` (now **101 keys**, confirmed
+    key-for-key identical across all three — verified by script, not by
+    eye) and wired up:
+    - `ScanSessionService.StatusText` (the shared toolbar's status
+      line) — default "Ready" message, "Scanning…", the skipped-folders
+      suffix, "no files found", "N files scanned", and the scan-failure
+      message. The default-ready message is a template
+      (`ScanSession.Ready` = "Ready — click \"{0}\" to start.") that
+      substitutes `MainWindow.SelectFolderButton`'s own resolved text
+      for `{0}`, rather than hardcoding the button's label a second
+      time — so the two can never drift out of sync in any language.
+    - `DuplicatesViewModel`/`QualityViewModel`'s empty-state and
+      results-count `StatusText` messages, plus their shared
+      Committing/Done/Failed status text (pulled into new `Common.*`
+      keys, `Common.CommittingStatus`/`CommitDoneAll`/
+      `CommitDonePartial`/`CommitFailedStatus`, since both features'
+      commit flow produces identical wording — same reasoning as the
+      earlier `Common.CommitConfirmDialog.*` sharing).
+    - `OrganizationViewModel`'s full status lifecycle — initial
+      placeholder, computing/moving/undoing progress text, the
+      plan/move/undo success and failure messages (9 keys).
+    - `SettingsViewModel`'s Clear Cache / Clear Move History
+      success/failure `StatusText` (4 keys).
+    - **The NavigationView's built-in Settings entry** (`IsSettingsVisible=
+      "True"`) was still showing the literal English word "Settings" in
+      every language, including Chinese — root cause: it's an implicit
+      item WinUI constructs internally, not a normal
+      `NavigationViewItem` declared in this app's XAML the way
+      Duplicates/Quality/Organization are, so it was never touched by
+      any `{loc:Loc}` binding. Fixed in `MainWindow.xaml.cs`: the item
+      isn't guaranteed to exist right after `InitializeComponent()`
+      (WinUI materializes it when the control applies its template,
+      not necessarily synchronously in the constructor), so
+      `Nav.SettingsItem` is set via a `Nav.Loaded` handler instead,
+      casting to `NavigationViewItem` and setting `.Content` to
+      `LocalizationService.Current.GetString("Nav.Settings")` — same
+      once-at-construction-time resolution as every other `{loc:Loc}`
+      binding, same restart-for-language-change caveat.
+    - Flagged, not fixed (pre-existing, consistent with a scope
+      boundary already established when the dialogs that embed these
+      were first localized): `CommitResult.Summary`/
+      `OrganizationExecutionResult.Summary`/`OrganizationUndoResult.
+      Summary` — Data-layer-generated result strings substituted into
+      already-localized dialog/status templates (e.g.
+      `Organization.UndoDoneStatus` = "Undo complete — {0}") — remain
+      English always, regardless of active language. This was already
+      true before this session (the wording pass's
+      `Organization.OrganizeCompleteDialog.Message` already embedded
+      `result.Summary` un-localized) and wasn't introduced by anything
+      here; noted as a real remaining gap for whoever picks up
+      localizing the Data layer's result-summary generation next,
+      not something this pass silently missed.
+  - **NavigationView pane overlay bug** — expanding the pane covered
+    the content area instead of pushing it aside. Root cause:
+    `PaneDisplayMode="LeftCompact"` (chosen in the original NavigationView
+    restructure, session history above) is inline only in its *collapsed*
+    state — WinUI switches its *expanded* state to `CompactOverlay`
+    (`SplitView.DisplayMode`) by design; this is documented,
+    intentional behavior for `LeftCompact`/`LeftMinimal` (a transient,
+    light-dismiss nav-rail flyout pattern), not a wiring mistake, so no
+    single property tweak keeps `LeftCompact` while stopping the
+    overlay. Investigated and rejected two alternatives before fixing:
+    reaching into `NavigationView`'s control template to force the
+    internal `SplitView.DisplayMode` directly (rejected — `NavigationView`
+    reassigns that itself on every pane-state change as part of its own
+    state machine, so a one-time external override would likely be
+    silently reverted the next time the pane toggles); and
+    `PaneDisplayMode="Auto"` (rejected — it only switches between the
+    same `Left`/`LeftCompact`/`LeftMinimal` behaviors based on window
+    width, so it doesn't add anything over picking a mode directly, and
+    would make "collapsed by default" width-dependent instead of
+    explicit). **Fix**: switched to `PaneDisplayMode="Left"` with
+    `IsPaneOpen="False"` set explicitly — `Left` is the one mode that is
+    inline (`Inline`/`CompactInline`) in *both* pane states, since it has
+    no overlay code path in `NavigationView`'s template at all;
+    `IsPaneOpen="False"` reproduces the same starts-collapsed appearance
+    `LeftCompact` had. (`Left` was tried once earlier in this app's
+    history and rejected for "clipping labels instead of hiding them" —
+    that was before every `NavigationViewItem` had an `Icon` set, which
+    this fix doesn't need to touch since icons were added in that same
+    earlier session and are already in place.) XAML-only, not
+    CLI-verifiable — the one point of residual uncertainty (exact
+    rendered width of the `IsPaneOpen="False"` collapsed state under
+    `Left`) needs Alan's visual confirmation, flagged explicitly in the
+    manual verification checklist below rather than assumed correct.
+- **Pane-animation background-flash fix**, found in review of the
+  push-not-overlay fix above. Root cause confirmed: `NavigationView` and
+  its child `Frame` both had no local `Background`, so each fell back to
+  its own default template brush — not guaranteed to equal (and, per the
+  visible symptom, evidently didn't equal) the root Grid's
+  `ApplicationPageBackgroundThemeBrush`. This mismatch was invisible only
+  by coincidence before the Light theme fix (session history above)
+  replaced a uniform hardcoded black with real theme-aware brushes; once
+  the brushes were real and distinct, the pane-width animation exposed
+  the seam between them as a brief flash of the wrong-colored surface.
+  **Fix**: `NavigationView.Background` and `Frame.Background` both set
+  explicitly to `ApplicationPageBackgroundThemeBrush`, matching the root
+  Grid — `Background` on the control fills the whole `NavigationView`
+  rectangle in its default template (behind both the pane and content
+  regions), so this one property is enough to cover any gap the
+  animation transiently exposes between them.
+  - **`NavigationView.PaneBackground` was tried first** (to target the
+    pane's own fill specifically, rather than relying on the outer
+    `Background` covering it) **and reverted — it reproducibly crashed
+    the WinAppSDK 1.6.250205002 XAML compiler** (`XamlCompiler.exe`
+    exits 1 with zero diagnostic output, no error message at all,
+    confirmed by bisecting this file property-by-property against a
+    clean `rm -rf obj` rebuild each time — `Background` alone compiles
+    and reaches the project's normal MSB4062 wall cleanly every time;
+    adding `PaneBackground` back in isolation reproduces the crash every
+    time). Not usable in this SDK version for whatever underlying
+    reason — don't reintroduce it without confirming a newer
+    WindowsAppSDK actually accepts it first. This is also a concrete
+    illustration of why the App project's "describe what should happen,
+    defer visual verification" convention (Architecture section above)
+    doesn't mean zero verification is possible from here — a `dotnet
+    build` bisection caught and diagnosed a real compiler crash that a
+    glance at the XAML alone would not have.
+  - XAML-only, not CLI-verifiable for the actual animation smoothness/
+    color-matching itself (only the fact that it now compiles was
+    confirmed this way) — flagged in the manual verification checklist
+    below.
+- **NavigationView pane brightness in Dark theme** — the pane now reads
+  as a slightly brighter, distinct surface from the main content area in
+  Dark theme (previously identical). **Deliberately not done via
+  `NavigationView.PaneBackground` set on the control** — that specific
+  dependency-property path reproducibly crashes the WinAppSDK
+  1.6.250205002 XAML compiler with zero diagnostics (documented in the
+  pane-animation-seam fix above and confirmed again this session via the
+  same property-by-property bisection). Instead, `App.xaml` now defines
+  a `ResourceDictionary.ThemeDictionaries` block with a **Dark-only**
+  entry that redefines `NavigationViewDefaultPaneBackground` — the named
+  `ThemeResource` key `NavigationView`'s own default control template
+  already pulls its pane fill from — aliased via `<StaticResource
+  x:Key="NavigationViewDefaultPaneBackground" ResourceKey=
+  "LayerFillColorDefaultBrush"/>` (the same "one step brighter than page
+  background" surface already used elsewhere in this app — MainWindow's
+  toolbar, Duplicates/Quality's staging panels — for the same elevation
+  purpose). This is a fundamentally different code path from setting the
+  property directly: a plain resource-dictionary entry with zero
+  property-setter codegen involved, so it isn't subject to the
+  `PaneBackground` crash — **confirmed by a clean `rm -rf obj` rebuild
+  reaching the project's normal MSB4062 wall cleanly, twice in a row**,
+  same verification discipline as the `PaneBackground` bisection itself.
+  Light theme is untouched (no "Light" key defined), so it keeps
+  NavigationView's normal default appearance. XAML-only, not
+  CLI-verifiable for the actual visual result — flagged in the manual
+  verification checklist below.
+- **Single-photo view** for Quality and Organization — the simpler
+  counterpart to Duplicates' "Compare Photos" (GroupDetailDialog) for
+  features that only ever need to show one file bigger, not a multi-file
+  comparison grid. New shared `Views/SinglePhotoDialog` (a `ContentDialog`)
+  takes a plain `(string filePath, Func<byte[]?> generateBytes)` rather
+  than binding to either caller's own row ViewModel type — Quality's rows
+  are `FileActionViewModel`, Organization's File-kind tree nodes are
+  `OrganizationNodeViewModel`, and neither should need to know about the
+  other just to share this dialog. Uses the same
+  `ThumbnailLoader.RequestThumbnail(Func<byte[]?>, ...)` delegate-injection
+  pattern already used throughout this codebase (FileActionViewModel/
+  OrganizationNodeViewModel/StagingEntryViewModel's own thumbnail
+  loading), so it stays reusable by any future caller with nothing more
+  than a path and a byte source. 320px sizing, matching
+  GroupDetailDialog's `DetailThumbnail` convention exactly (same
+  `ThumbnailCache` instance, same 320px cache key, kept separate from
+  each row's own smaller default-size thumbnail).
+  - `QualityViewModel`/`OrganizationViewModel` each gained a
+    `GetDetailThumbnailProvider(filePath)` method (mirrors the existing
+    `DetailThumbnailMaxDimension = 320` constant already established by
+    `DuplicatesViewModel`) — a one-line wrapper handing back a delegate
+    over their existing `_thumbnailCache`/`GetLastModified`, nothing
+    novel.
+  - `QualityPage.xaml`: a new "View Photo" button per row
+    (`Common.ViewPhotoButton`), always visible (every Quality row is a
+    real file). `OrganizationPage.xaml`: the same button added to the
+    TreeView's per-node row, but its `Visibility` reuses the existing
+    `ThumbnailVisibility` property (already "is this a File-kind node,
+    not Year/Month/Category" — the exact check needed here too, so no
+    new property was added just for this).
+  - 2 new dictionary keys (`Common.ViewPhotoButton`, `SinglePhoto.Title`)
+    added to all three language files — 103 keys now, confirmed
+    key-for-key identical across `dev.json`/`en.json`/`zh.json`.
+  - **Not automated-test-covered, disclosed rather than silently
+    skipped**: this is pure App-layer WinUI dialog/button wiring plus
+    two one-line ViewModel wrapper methods delegating to an
+    already-thoroughly-tested `ThumbnailCache` — there was no natural
+    Core/Data-testable unit of logic here to add a test for, consistent
+    with every other WinUI-only feature in this file. The 103-key
+    parity check was done the same way prior localization passes were
+    verified (a script comparing key sets across all three JSON files),
+    not as a persisted xUnit test, since Data.Tests has no reason to
+    reference the App project's bundled `Strings/` content.
 
 ### Known gaps / not yet started
 **Current priority order for what's next**, now that Duplicates/Quality/
-Organization/Settings are all feature-complete:
-1. **Localization** — not started. Plain-English text mode and Chinese
-   language support have been raised but no infrastructure (resource
-   files, a language switcher, string externalization) exists yet.
-2. **General UI polish** — not started. Specific items raised: per-page
+Organization/Settings are all feature-complete and localization
+(Dev/English/Chinese, wording + infrastructure) is fully done:
+1. **General UI polish** — not started. Specific items raised: per-page
    accent coloring (currently uniform/black across Duplicates/Quality/
    Organization rather than each page having its own accent) and a
    sticky/always-visible "Select Folder" bar.
-3. **Distribution/.exe packaging** — not started (see the "No installer
+2. **Distribution/.exe packaging** — not started (see the "No installer
    or distribution path" gap below for the current constraint in detail).
-4. **Video duplicate/near-duplicate detection** — not started at all,
-   and deliberately deferred until after 1–3 above per current priority
+3. **Video duplicate/near-duplicate detection** — not started at all,
+   and deliberately deferred until after 1–2 above per current priority
    order. The app only scans image files today (see ScanSessionService's
    ImageExtensions list); no video sampling/hashing exists yet despite
    Core being scoped for it in the Architecture section below.
@@ -993,9 +1559,21 @@ Other known gaps (not on the roadmap above, but still open):
   (BlurScore is, in Quality) — ScreenshotHeuristic itself is unused in
   favor of MetadataClassifier's HasExif-based approach (see Completed,
   session 12) but remains in Core in case it's useful elsewhere later.
-- Quality's review list has no thumbnail-size detail view equivalent to
-  Duplicates' GroupDetailDialog (not requested — Quality's flat list
-  already shows a 64px thumbnail per row).
+- **NavigationView pane-animation seam — acknowledged, not worth fixing
+  right now.** A faint gap/color flash during the pane collapse/expand
+  animation is still minorly visible (most noticeable around the
+  Duplicates/Quality staging panel area), even after the background-
+  brush consistency fix (session history above) resolved the original,
+  larger version of this same symptom. This residual is smaller and
+  likely just animation-timing/compositing rather than a remaining color
+  mismatch — the brushes involved (`NavigationView`/`Frame`/root Grid)
+  are already confirmed consistent. Deliberately left alone: low-
+  priority, purely cosmetic, and chasing WinUI animation-timing
+  internals further risks leading back into the same kind of
+  undiagnosable XamlCompiler/control-template territory that
+  `PaneBackground` did (session history above) — not worth it for a
+  barely-visible seam. Revisit only if it becomes more noticeable or
+  someone has a concrete lead, not proactively.
 
 ### Manual verification needed (Alan, via Visual Studio F5)
 Thumbnails and the group detail view were built and unit-tested where
@@ -1420,3 +1998,298 @@ When run:
     change — this pass added an explicit background and a couple of
     surface brushes but didn't touch anything Dark-specific, so Dark
     should be unaffected, not just "not worse."
+- **Localization infrastructure (new this session) — Dev-language
+  behavior should be provably unchanged; English/Chinese are placeholder
+  only in this pass (empty dictionaries), so the main thing to verify is
+  that the MECHANISM works, not any actual translated wording (there
+  isn't any yet).**
+  - Launch the app with no settings.json present (or Language never
+    touched) — confirm every page, dialog, and Organization folder name
+    reads exactly as it did before this session (this is the "Dev is
+    provably identical to today" bar the whole dictionary extraction was
+    built to hit — if anything reads differently, that's a bug in the
+    extraction, not an intentional change).
+  - Open Settings — confirm a new "Language" section appears below
+    "Appearance" with three options (Dev/English/Chinese), same
+    RadioButtons style as the theme picker.
+  - Switch to English or Chinese — confirm the Settings page's own
+    status line shows the "applies to new dialogs immediately; restart
+    for everywhere else" message, and that it does NOT crash or show
+    blank/raw-key text anywhere (English/Chinese dictionaries are
+    genuinely empty right now — every single string should silently
+    fall back to Dev's wording, so switching language should currently
+    be visually a no-op almost everywhere, not broken/blank).
+  - After switching to English or Chinese, open any ContentDialog (e.g.
+    Duplicates' Commit Changes confirmation, or Settings' Clear Cache
+    confirmation) — per the fallback behavior, it should look identical
+    to Dev (no translated text exists yet), but confirm it opens
+    normally with no errors — this exercises the "dialogs update
+    immediately, no restart needed" code path even though there's
+    nothing different to see yet.
+  - Restart the app after picking English or Chinese — confirm it
+    still opens without error and the setting persisted (check
+    `%LOCALAPPDATA%\ImageCleanup\settings.json` for a `"Language"` value
+    matching your last choice).
+  - Switch Theme after having changed Language (or vice versa) — confirm
+    changing one setting does NOT silently reset the other back to its
+    default (this was an actual bug fixed in this session — previously
+    each setter saved a fresh `AppSettings` object, dropping whichever
+    field it didn't touch). Check `settings.json` directly to confirm
+    both fields are present and correct after alternating a few changes.
+  - Organization: run a scan and preview an Organization plan under each
+    language — confirm the tree still shows "Photo"/"NoMetadata" category
+    folders exactly as before (Dev fallback, since `en.json`/`zh.json`
+    don't have `Organization.FolderName.*` yet) — this is the folder-name
+    localization hook mentioned above; nothing should look different yet,
+    but it also shouldn't error or show a blank category name.
+  - NavigationView collapsed/expanded pane, both languages — confirm
+    "Duplicates"/"Quality"/"Organization" nav labels still render (via
+    `{loc:Loc}` now instead of a literal string) with no blank/missing
+    labels.
+  - This is the first WinUI custom `MarkupExtension`
+    (`App.Localization.LocExtension`) used anywhere in this codebase and
+    cannot be confirmed via the CLI build (App project constraint, as
+    always) — if the build fails in Visual Studio specifically on
+    `{loc:Loc ...}` usages, that's the first thing to check; every other
+    part of this session (LocalizationService, AppSettings, the
+    Organization resolver hook) is Core/Data and already covered by the
+    automated test run.
+- **Action-string value/display split + English wording (new this
+  session).** Dev-language behavior should still be provably unchanged;
+  the main new things to verify are the ComboBox binding-mode switch
+  (DuplicatesPage/GroupDetailDialog now use SelectedIndex, matching
+  Quality) and that switching to English actually shows plain wording.
+  - Under Dev language: scan a folder with duplicates, open Duplicates —
+    confirm the action ComboBox on every row still behaves exactly as
+    before (None/Keep/Delete/Move selectable, Keep-conflict reassignment
+    still bumps the previous Keep file to Delete, the ★ badge/border
+    still follow whichever file is Keep). This is the regression check
+    for the SelectedItem → SelectedIndex binding switch — if anything
+    shows blank or stops responding to selection, that's the first thing
+    to suspect.
+  - Same check in GroupDetailDialog (View Group → each file's ComboBox)
+    and in Quality (unaffected by the binding switch, but still reads
+    ActionType now under the hood — confirm Delete/Move staging and the
+    Commit flow still work).
+  - Stage a Delete/Move in Duplicates or Quality — confirm the staging
+    review panel at the bottom shows "Delete"/"Move" text exactly as
+    before under Dev (this is `StagingEntryViewModel.Action`, now
+    resolved through the same localized-display path as the ComboBox —
+    should be visually identical under Dev, just routed differently).
+  - Switch to English in Settings, then re-check Duplicates/Quality/
+    Organization/Settings — confirm the plain-language wording from this
+    session's `en.json` appears (e.g. Settings' "Clear What's Been
+    Scanned" instead of "Clear Cache", Organization's "Organize My
+    Photos…" instead of "Organize Files…", the Quality tooltip talking
+    about sharpness instead of "BlurScore"). Since switching language
+    needs a restart for already-open pages (see the localization-
+    infrastructure session above), restart the app after switching
+    before checking.
+  - **Organize a disposable test folder under English mode** (same
+    "use throwaway files, not a real library" caution as every other
+    Organization move check) — confirm the created category folder is
+    actually named "Other" on disk (not "NoMetadata") for files without
+    EXIF, since `Organization.FolderName.NoMetadata`'s English value is a
+    real folder name, not just UI text. This is the one part of the
+    English wording pass with an actual functional (not just cosmetic)
+    consequence — worth confirming deliberately rather than assuming it
+    looks right from the UI alone.
+  - Confirm every confirmation/warning dialog under English (Organize,
+    Undo, Clear Move History) still clearly conveys the serious/
+    non-reversible parts of what it's about to do — read them as if
+    unfamiliar with the app, not just skimming for length.
+- **English wording review + Quality layout fix (new this session).**
+  - Under English: confirm Organization's destination-picker button
+    reads "Destination Folder…", the Organize button reads just
+    "Organize…", and both the Undo button and the "no logs found"
+    dialog title read "Undo an Action" (not "Undo an Earlier Organize").
+  - Under English, in Settings: confirm both the button and its confirm
+    dialog read "Clear Previous Scans" (not "Clear What's Been
+    Scanned").
+  - Under English, scan a folder with at least one near-duplicate group
+    (not just exact duplicates) and open Duplicates — confirm the group
+    header reads "Near duplicate" (not "near-dup"), and that an exact-
+    match group reads "Exact match". Stage a Delete/Move on either page
+    — confirm the panel above the staging list reads "Changes to Make
+    (N)" under English, not "Review Staged Changes (N)" or any other
+    use of the word "staged"/"staging".
+  - **Quality row alignment** — this is the fix most worth a careful
+    look, since it's a visual layout change with no automated coverage.
+    Scan a folder and open Quality: confirm each row's thumbnail, file
+    path, BlurScore number, and action ComboBox all sit on the same
+    visual center line — the ComboBox should look the same height as it
+    does in Duplicates' equivalent row, not visibly taller/stretched or
+    offset from the rest of the row. Compare a Quality row directly
+    against a Duplicates row side-by-side (switch tabs) if the
+    difference isn't obvious at a glance.
+- **Chinese (Simplified) mode (new this session) — localization's last
+  remaining gap. This is the first time any non-Latin script has
+  rendered anywhere in this app, so treat this as a genuinely new
+  surface to check, not just "does the text look different."**
+  - Switch to Chinese in Settings, restart the app (per the established
+    "language change needs a restart to reach already-rendered pages"
+    behavior) — confirm every page (Duplicates, Quality, Organization,
+    Settings, the shared toolbar, the NavigationView tab labels) shows
+    Chinese text with no mojibake (garbled/replacement-box characters),
+    no missing glyphs, and no visibly wrong/fallback font — WinUI should
+    pick a correct CJK-capable font automatically via its Fluent font
+    fallback, but this has never been exercised in this app before now,
+    so it's worth confirming rather than assuming.
+  - Open every ContentDialog under Chinese (Commit confirm/complete,
+    Organize confirm/complete, Undo picker/confirm/complete, Clear
+    Previous Scans, Clear Organize History) — same check: correct
+    glyphs, no truncation/clipping of the longer Chinese sentences
+    (dialog width/wrapping was tuned against English text length, not
+    tested against Chinese line-wrapping behavior).
+  - Duplicates: scan a folder with both an exact-duplicate group and a
+    near-duplicate group — confirm the group headers read "完全相同"
+    and "相似" respectively (not the Dev/English words), and that the
+    count/measure-word phrasing ("N 张照片") reads naturally, not just
+    correctly-substituted.
+  - Stage a Delete/Move under Chinese — confirm the panel header reads
+    "待处理的更改（N）" with the count correctly substituted in the
+    parenthetical position.
+  - **Organization — the end-to-end folder-name check, on a disposable
+    test folder only** (same caution as every other real-move check in
+    this file): with at least one file that has EXIF (camera/phone
+    photo) and one that doesn't (screenshot/download), run "整理…"
+    (Organize) under Chinese mode and confirm the actual folders created
+    on disk are named "照片" and "其他" (not "Photo"/"NoMetadata" or a
+    garbled/mis-encoded name) — check this directly in File Explorer,
+    not just in the app's own tree preview, since this is real
+    filesystem behavior (`OrganizationExecutor`/`File.Move`), not just
+    UI text rendering. Confirm Windows Explorer displays and sorts into
+    those folders normally (open them, rename-test if you want extra
+    confidence) — this is the one part of the Chinese pass with an
+    actual functional, on-disk consequence, not just cosmetic text.
+  - Confirm Organization's "N of M photo(s)" countText (used inside the
+    move-confirmation dialog) reads grammatically in Chinese when a
+    partial selection is organized (e.g. deselect a few files first) —
+    this template reorders its two placeholders in Chinese ({total}
+    before {selected}) rather than keeping English's order, so it's
+    worth specifically confirming the substituted numbers land in the
+    right places and the sentence still makes sense, not just that it
+    doesn't crash.
+- **Remaining localization coverage + NavigationView pane fix (new this
+  session) — both are WinUI-layer/visual and neither is CLI-verifiable;
+  treat "getting it right" as more important than a quick glance here.**
+  - **No more raw English under Chinese mode** — this is the headline
+    regression to re-check, since it's exactly what was reported
+    broken. Switch to Chinese, restart, then work through every page
+    checking specifically for leftover English text, not just that
+    Chinese text is *present* somewhere:
+    - The shared toolbar's status line in its untouched/empty state
+      (right after launch, before selecting a folder) — should read
+      entirely in Chinese, not "Ready — click..." in English.
+    - Duplicates/Quality/Organization's own empty-state status line
+      (switch to each tab before scanning anything).
+    - Scan a folder and confirm the "N found" / "N scanned" / "N
+      duplicate groups" / "N photos, blurriest first" status messages
+      are fully Chinese, not a Chinese sentence with a stray English
+      fragment.
+    - Stage a commit, run it, and confirm the "Done — N processed" /
+      "N succeeded, N failed" / failure messages are Chinese.
+    - Run an Organize, then an Undo, and confirm every progress/done/
+      failed status line for both is Chinese.
+    - Settings: run Clear Cache and Clear Move History and confirm
+      both success messages read in Chinese.
+    - **Click the hamburger to expand the pane and look at the
+      "Settings" entry's label specifically** — this is the one that
+      was structurally different (an implicit NavigationView-generated
+      item, not a normal menu item) and easy to miss on a casual
+      glance; confirm it reads "设置", not "Settings".
+    - Repeat spot checks in English mode too — this pass touched
+      `en.json` as much as `zh.json`, so confirm the same status
+      messages read in plain English there (e.g. Settings' "Ready —
+      click..." message, Organization's progress text) rather than
+      assuming only the Chinese side could have regressed.
+  - **NavigationView pane expand/collapse — test in all three
+    languages** (the fix itself is language-independent, but do this
+    alongside the localization check since you'll already be switching
+    languages):
+    - On launch, confirm the pane starts collapsed to icon-only (Copy/
+      Filter/Folder/gear icons, no labels) — same starting appearance
+      as before this session's fix.
+    - Click the hamburger to expand — confirm the main content area
+      (the page Frame) visibly shifts/shrinks to make room for the
+      now-wider pane, rather than the pane floating on top of the
+      content with the content staying in place underneath it. This is
+      the actual bug being fixed — compare directly against the
+      before-fix screenshot/description if unsure ("overlay" = content
+      still fully visible and interactive-looking behind a floating
+      pane; "push" = content area genuinely narrower, pane and content
+      side by side with no overlap).
+    - Click the hamburger again to collapse — confirm content expands
+      back to fill the freed space, and confirm clicking somewhere in
+      the content area while the pane is expanded does NOT auto-close
+      the pane (light-dismiss is an overlay-mode behavior; inline mode
+      should have no light-dismiss — if clicking content collapses the
+      pane, that's a sign it's still in an overlay-like mode and the
+      fix didn't fully take).
+    - Resize the window narrower and wider with the pane both collapsed
+      and expanded — confirm nothing clips, overlaps, or looks broken
+      at a few different widths, since `PaneDisplayMode="Left"` doesn't
+      have `Auto`'s automatic width-based mode-switching and this
+      hasn't been tested at extreme window sizes.
+    - This is a genuinely uncertain fix in one respect, flagged
+      explicitly rather than assumed: confirm the collapsed
+      (`IsPaneOpen="False"`) state actually renders as a narrow
+      icon-only rail (matching `LeftCompact`'s old collapsed width) and
+      not some other width — the reasoning behind this fix is solid on
+      the inline-vs-overlay question, but the exact collapsed pixel
+      width under `PaneDisplayMode="Left"` wasn't something that could
+      be confirmed without running the app.
+- **Pane-animation background flash (new this session)** — do this
+  alongside the pane expand/collapse check above, in both Light and
+  Dark theme (the bug specifically only became visible after Light mode
+  got real, non-black brushes, so both themes are worth checking, not
+  just Light).
+  - Click the hamburger to expand and collapse the pane a few times in
+    a row, watching closely (may be easiest to see slowed down — resize
+    the window or just repeat the toggle several times) — confirm there
+    is no brief flash of a different-colored strip/gap between the pane
+    and the content area mid-animation. Before this fix, that flash
+    would show whatever color `NavigationView`'s default template
+    brush happened to be, distinct from the app's actual background.
+  - Confirm this holds in both Light and Dark theme, and confirm
+    switching theme WHILE the pane is mid-animation (if timing allows)
+    doesn't reveal any stale color either.
+  - Confirm the pane and the content area still look like one seamless
+    background when the pane is fully open or fully closed (not just
+    mid-animation) — this fix touches `NavigationView.Background` and
+    `Frame.Background`, both static-state checks worth a glance too,
+    not only the animated transition.
+- **Pane brightness in Dark theme (new this session)** — switch to Dark
+  theme (Settings), expand the pane, and confirm it now reads as a
+  visibly brighter/distinct surface from the main content area — not
+  identical the way they were before this fix. Switch to Light theme
+  and confirm the pane looks unchanged from before this session (only
+  Dark was touched). Collapse/expand the pane a few times in Dark and
+  confirm the brighter pane color is consistent in both the collapsed
+  (icon-only) and expanded (icon+label) states, not just one of them.
+- **Single-photo view (new this session) — Quality and Organization.**
+  - Quality: scan a folder, open the Quality tab, click "View Photo" on
+    any row — confirm a dialog opens showing that one photo at a larger
+    size (comparable to Duplicates' "Compare Photos" per-file card
+    size) with its file path shown below, and a Close button. Confirm
+    the photo loads in progressively (not blocking dialog open) and
+    that reopening the same file's dialog a second time shows the
+    photo immediately (already cached, no re-generation) — same
+    caching behavior Duplicates' detail view already has.
+  - Organization: switch to the Organization tab, expand a Category
+    node, and confirm every individual File node (not the Year/Month/
+    Category group nodes themselves) shows a "View Photo" button —
+    clicking it should open the same style of dialog as Quality's,
+    showing that file. Confirm Year/Month/Category nodes do NOT show
+    the button (only File-kind nodes should).
+  - Confirm "View Photo" text (and the dialog's title) read correctly
+    in all three languages — Dev "View Photo"/"Photo", English same,
+    Chinese "查看照片"/"照片" — switch language in Settings, restart,
+    and re-check both features.
+  - Confirm opening a photo from Quality and then a different photo
+    from Organization (or vice versa) both work correctly in the same
+    app session — this exercises the shared `SinglePhotoDialog` from
+    two different call sites with two different underlying ViewModel
+    types, which is the main integration risk this design was meant to
+    avoid (nothing in the dialog itself is type-specific, but worth
+    confirming directly rather than assuming).

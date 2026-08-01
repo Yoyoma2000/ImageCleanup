@@ -27,18 +27,28 @@ public partial class App : Application
         var services = new ServiceCollection();
         services.AddSingleton<ScanSessionService>();
         services.AddSingleton<SettingsService>();
+        services.AddSingleton<LocalizationService>();
         Services = services.BuildServiceProvider();
     }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        var settings = Services.GetRequiredService<SettingsService>().Load();
+
+        // Must happen before any page is constructed: {loc:Loc} markup
+        // extensions resolve via the static LocalizationService.Current at
+        // XAML-parse time, and MainWindow's own XAML is parsed inside
+        // `new MainWindow()` below.
+        var localization = Services.GetRequiredService<LocalizationService>();
+        LocalizationService.Current = localization;
+        localization.SetLanguage(settings.Language);
+
         _window = new MainWindow();
         ShellWindow = _window;
 
         // Applied before Activate() so the window never flashes the wrong
         // theme on launch — RequestedTheme on the root element is honored
         // as soon as content is set, ahead of the first paint.
-        var settings = Services.GetRequiredService<SettingsService>().Load();
         ApplyTheme(settings.Theme);
 
         _window.Activate();

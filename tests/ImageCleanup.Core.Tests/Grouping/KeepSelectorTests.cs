@@ -7,11 +7,11 @@ public class KeepSelectorTests
     [Fact]
     public void ResolveKeepConflicts_NoOtherKeepFiles_ReturnsEmpty()
     {
-        var actions = new (string, string)[]
+        var actions = new (string, ActionType)[]
         {
-            ("a.jpg", "Keep"),
-            ("b.jpg", "Delete"),
-            ("c.jpg", "Delete"),
+            ("a.jpg", ActionType.Keep),
+            ("b.jpg", ActionType.Delete),
+            ("c.jpg", ActionType.Delete),
         };
 
         var conflicts = KeepSelector.ResolveKeepConflicts(actions, "a.jpg");
@@ -22,11 +22,11 @@ public class KeepSelectorTests
     [Fact]
     public void ResolveKeepConflicts_OneOtherKeepFile_ReturnsIt()
     {
-        var actions = new (string, string)[]
+        var actions = new (string, ActionType)[]
         {
-            ("a.jpg", "Keep"),
-            ("b.jpg", "Keep"),
-            ("c.jpg", "Delete"),
+            ("a.jpg", ActionType.Keep),
+            ("b.jpg", ActionType.Keep),
+            ("c.jpg", ActionType.Delete),
         };
 
         var conflicts = KeepSelector.ResolveKeepConflicts(actions, "b.jpg");
@@ -37,12 +37,12 @@ public class KeepSelectorTests
     [Fact]
     public void ResolveKeepConflicts_MultipleOtherKeepFiles_ReturnsAll()
     {
-        var actions = new (string, string)[]
+        var actions = new (string, ActionType)[]
         {
-            ("a.jpg", "Keep"),
-            ("b.jpg", "Keep"),
-            ("c.jpg", "Keep"),
-            ("d.jpg", "Delete"),
+            ("a.jpg", ActionType.Keep),
+            ("b.jpg", ActionType.Keep),
+            ("c.jpg", ActionType.Keep),
+            ("d.jpg", ActionType.Delete),
         };
 
         var conflicts = KeepSelector.ResolveKeepConflicts(actions, "d.jpg");
@@ -53,9 +53,9 @@ public class KeepSelectorTests
     [Fact]
     public void ResolveKeepConflicts_NewKeepFileExcludedFromItsOwnConflictList()
     {
-        var actions = new (string, string)[]
+        var actions = new (string, ActionType)[]
         {
-            ("a.jpg", "Keep"),
+            ("a.jpg", ActionType.Keep),
         };
 
         var conflicts = KeepSelector.ResolveKeepConflicts(actions, "a.jpg");
@@ -66,9 +66,9 @@ public class KeepSelectorTests
     [Fact]
     public void ResolveKeepConflicts_PathComparisonIsCaseInsensitive()
     {
-        var actions = new (string, string)[]
+        var actions = new (string, ActionType)[]
         {
-            ("A.JPG", "Keep"),
+            ("A.JPG", ActionType.Keep),
         };
 
         var conflicts = KeepSelector.ResolveKeepConflicts(actions, "a.jpg");
@@ -79,11 +79,11 @@ public class KeepSelectorTests
     [Fact]
     public void ResolveKeepConflicts_IgnoresNonKeepFilesEntirely()
     {
-        var actions = new (string, string)[]
+        var actions = new (string, ActionType)[]
         {
-            ("a.jpg", "None"),
-            ("b.jpg", "Move"),
-            ("c.jpg", "Delete"),
+            ("a.jpg", ActionType.None),
+            ("b.jpg", ActionType.Move),
+            ("c.jpg", ActionType.Delete),
         };
 
         var conflicts = KeepSelector.ResolveKeepConflicts(actions, "d.jpg");

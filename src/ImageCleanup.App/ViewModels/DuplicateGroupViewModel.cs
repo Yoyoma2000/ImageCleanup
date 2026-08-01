@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using ImageCleanup.Core.Grouping;
+using ImageCleanup.Data.Services;
 
 namespace ImageCleanup.App.ViewModels;
 
@@ -18,10 +19,13 @@ public sealed class DuplicateGroupViewModel : INotifyPropertyChanged
     {
         get
         {
-            var kind = _isExactMatch ? "exact" : "near-dup";
-            var keepFile = FileActions.FirstOrDefault(f => f.SelectedAction == KeepSelector.KeepAction);
-            var keepName = keepFile is not null ? Path.GetFileName(keepFile.FilePath) : "none selected";
-            return $"{FileActions.Count} files ({kind}) — Keep: {keepName}";
+            var loc = LocalizationService.Current;
+            var kind = loc.GetString(_isExactMatch
+                ? "Duplicates.GroupKind.Exact"
+                : "Duplicates.GroupKind.NearDuplicate");
+            var keepFile = FileActions.FirstOrDefault(f => f.SelectedActionType == ActionType.Keep);
+            var keepName = keepFile is not null ? Path.GetFileName(keepFile.FilePath) : loc.GetString("Duplicates.NoneSelected");
+            return loc.GetString("Duplicates.GroupHeader", FileActions.Count, kind, keepName);
         }
     }
 

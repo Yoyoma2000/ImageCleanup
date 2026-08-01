@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using ImageCleanup.App.Services;
+using ImageCleanup.Core.Metadata;
 using ImageCleanup.Core.Organization;
 using ImageCleanup.Data.Models;
 using ImageCleanup.Data.Services;
@@ -36,7 +37,7 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
     /// <summary>True once the user has explicitly picked a destination — stops auto-defaulting it on every rescan.</summary>
     private bool _destinationManuallySet;
 
-    private string _statusText = "Select a folder above to preview an organization plan.";
+    private string _statusText = LocalizationService.Current.GetString("Organization.InitialStatus");
     public string StatusText
     {
         get => _statusText;
@@ -95,7 +96,8 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
 
     private async Task RebuildAsync()
     {
-        StatusText = "Computing organization plan…";
+        var loc = LocalizationService.Current;
+        StatusText = loc.GetString("Organization.ComputingStatus");
 
         try
         {
@@ -110,7 +112,9 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
 
             var (plan, tree) = await Task.Run(() =>
             {
-                var plan = OrganizationPlanner.BuildHierarchy(recordsSnapshot.Select(r => r.ToImageRecord()));
+                var plan = OrganizationPlanner.BuildHierarchy(
+                    recordsSnapshot.Select(r => r.ToImageRecord()),
+                    ResolveCategoryFolderName);
                 return (plan, OrganizationTreeBuilder.BuildTree(plan));
             });
 
@@ -144,12 +148,12 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
 
             var monthCount = tree.Sum(year => year.Children.Count);
             StatusText = plan.FileCount == 0
-                ? "No files to organize yet — scan a folder first."
-                : $"{plan.FileCount} file(s) across {monthCount} month(s).";
+                ? loc.GetString("Organization.NoFilesToOrganize")
+                : loc.GetString("Organization.PlanSummary", plan.FileCount, monthCount);
         }
         catch (Exception ex)
         {
-            StatusText = $"Couldn't compute an organization plan: {ex.Message}";
+            StatusText = loc.GetString("Organization.PlanFailed", ex.Message);
         }
     }
 
@@ -174,6 +178,17 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
         }
     }
 
+    private const int DetailThumbnailMaxDimension = 320;
+
+    /// <summary>
+    /// Returns a byte-generating delegate for SinglePhotoDialog's "View
+    /// Photo" on a File-kind tree node — same 320px size/ThumbnailCache-entry
+    /// convention Duplicates'/Quality's own detail views use, kept as its
+    /// own cache key separate from the tree row's default-size Thumbnail.
+    /// </summary>
+    public Func<byte[]?> GetDetailThumbnailProvider(string filePath) =>
+        () => _thumbnailCache.GetOrCreateThumbnail(filePath, GetLastModified(filePath), DetailThumbnailMaxDimension);
+
     /// <summary>
     /// Moves only the currently-selected/checked files in the plan to
     /// DestinationFolder (default: every node starts checked, so this moves
@@ -192,7 +207,8 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
             return new OrganizationExecutionResult();
 
         IsIdle = false;
-        StatusText = "Moving files…";
+        var loc = LocalizationService.Current;
+        StatusText = loc.GetString("Organization.MovingStatus");
         try
         {
             var plan = _currentPlan;
@@ -208,14 +224,14 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
             await _scanSession.RefreshAsync();
 
             StatusText = result.Failed == 0
-                ? $"Done — {result.Succeeded} file(s) moved. Move log: {result.MoveLogPath}"
-                : $"Done — {result.Succeeded} succeeded, {result.Failed} failed. Move log: {result.MoveLogPath}";
+                ? loc.GetString("Organization.MoveDoneAll", result.Succeeded, result.MoveLogPath)
+                : loc.GetString("Organization.MoveDonePartial", result.Succeeded, result.Failed, result.MoveLogPath);
 
             return result;
         }
         catch (Exception ex)
         {
-            StatusText = $"Move failed: {ex.Message}";
+            StatusText = loc.GetString("Organization.MoveFailedStatus", ex.Message);
             return new OrganizationExecutionResult();
         }
         finally
@@ -238,7 +254,8 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
     public async Task<OrganizationUndoResult> UndoMoveLogAsync(string moveLogPath)
     {
         IsIdle = false;
-        StatusText = "Undoing a previous move…";
+        var loc = LocalizationService.Current;
+        StatusText = loc.GetString("Organization.UndoingStatus");
         try
         {
             var result = await Task.Run(() => OrganizationUndoService.Undo(moveLogPath));
@@ -248,12 +265,12 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
             // restored disk state, same as ExecutePlanAsync does after a move.
             await _scanSession.RefreshAsync();
 
-            StatusText = $"Undo complete — {result.Summary}";
+            StatusText = loc.GetString("Organization.UndoDoneStatus", result.Summary);
             return result;
         }
         catch (Exception ex)
         {
-            StatusText = $"Undo failed: {ex.Message}";
+            StatusText = loc.GetString("Organization.UndoFailedStatus", ex.Message);
             return new OrganizationUndoResult();
         }
         finally
@@ -261,6 +278,22 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
             IsIdle = true;
         }
     }
+
+    /// <summary>
+    /// Resolves a MetadataCategory to the folder name actually used on disk
+    /// (and shown in the tree) — reads through LocalizationService so
+    /// Organization.FolderName.Photo/NoMetadata respect the active
+    /// language, falling back to Dev's "Photo"/"NoMetadata" for any
+    /// language/key not yet translated (LocalizationService's own
+    /// fallback), so Dev-language behavior is provably unchanged from
+    /// before this resolver existed.
+    /// </summary>
+    private static string ResolveCategoryFolderName(MetadataCategory category) => category switch
+    {
+        MetadataCategory.Photo      => LocalizationService.Current.GetString("Organization.FolderName.Photo"),
+        MetadataCategory.NoMetadata => LocalizationService.Current.GetString("Organization.FolderName.NoMetadata"),
+        _                           => category.ToString(),
+    };
 
     private HashSet<string> GetSelectedSourcePaths() =>
         _selectionRoots

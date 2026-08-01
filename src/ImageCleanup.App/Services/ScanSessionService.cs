@@ -12,6 +12,7 @@ using ImageCleanup.Core.Quality;
 using ImageCleanup.Data;
 using ImageCleanup.Data.Models;
 using ImageCleanup.Data.Repositories;
+using ImageCleanup.Data.Services;
 using Microsoft.Data.Sqlite;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
@@ -44,7 +45,8 @@ public sealed class ScanSessionService : INotifyPropertyChanged
         private set { _currentFolder = value; Notify(); }
     }
 
-    private string _statusText = "Ready — click \"Select Folder\" to start.";
+    private string _statusText = LocalizationService.Current.GetString(
+        "ScanSession.Ready", LocalizationService.Current.GetString("MainWindow.SelectFolderButton"));
     public string StatusText
     {
         get => _statusText;
@@ -97,7 +99,8 @@ public sealed class ScanSessionService : INotifyPropertyChanged
         if (CurrentFolder is null) return;
 
         IsIdle = false;
-        StatusText = "Scanning…";
+        var loc = LocalizationService.Current;
+        StatusText = loc.GetString("ScanSession.Scanning");
 
         try
         {
@@ -107,18 +110,18 @@ public sealed class ScanSessionService : INotifyPropertyChanged
             foreach (var r in scanned) Records.Add(r);
 
             var skippedSuffix = _lastSkippedDirectories.Count > 0
-                ? $" ({_lastSkippedDirectories.Count} folder(s) skipped — hidden, system, or inaccessible)"
+                ? loc.GetString("ScanSession.SkippedFoldersSuffix", _lastSkippedDirectories.Count)
                 : string.Empty;
 
             StatusText = scanned.Count == 0
-                ? $"No image files found in that folder (including subfolders).{skippedSuffix}"
-                : $"{scanned.Count} file(s) scanned, including subfolders.{skippedSuffix}";
+                ? loc.GetString("ScanSession.NoFilesFound", skippedSuffix)
+                : loc.GetString("ScanSession.FilesScanned", scanned.Count, skippedSuffix);
 
             ScanCompleted?.Invoke(this, EventArgs.Empty);
         }
         catch (Exception ex)
         {
-            StatusText = $"Scan failed: {ex.Message}";
+            StatusText = loc.GetString("ScanSession.ScanFailed", ex.Message);
         }
         finally
         {

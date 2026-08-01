@@ -2,7 +2,8 @@
     x:Class="ImageCleanup.App.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="ImageCleanup">
+    xmlns:loc="using:ImageCleanup.App.Localization"
+    Title="{loc:Loc Key=App.Title}">
 
     <!--
         Explicit Background is required here: an unpackaged WinUI 3 Window
@@ -33,7 +34,7 @@
             <StackPanel Orientation="Horizontal"
                         Spacing="12"
                         Padding="16,16,16,8">
-                <Button Content="Select Folder"
+                <Button Content="{loc:Loc Key=MainWindow.SelectFolderButton}"
                         Click="OnSelectFolderClick"
                         IsEnabled="{x:Bind ScanSession.IsIdle, Mode=OneWay}"/>
                 <TextBlock Text="{x:Bind ScanSession.StatusText, Mode=OneWay}"
@@ -43,38 +44,96 @@
         </Border>
 
         <!--
-            LeftCompact (not the previous "Left") is what gives the hamburger
-            toggle its collapse/expand behavior: collapsed shows a slim
-            icon-only pane (CompactPaneLength, ~48px — too narrow for label
-            text, which is why "Left" was clipping labels instead of hiding
-            them), toggled-open shows the full icon+label pane. Icons are
-            required for this mode — without one, a collapsed item renders
-            as an empty slot.
+            PaneDisplayMode="Left" + IsPaneOpen="False", NOT "LeftCompact"
+            (reverted — see below for why). Icons are still required on every
+            NavigationViewItem regardless of mode — without one, a collapsed
+            item renders as an empty slot.
+
+            Root cause of a bug found in review: LeftCompact's collapsed
+            state is inline (a compact icon rail, which is what made it look
+            right at first), but WinUI's NavigationView switches its
+            *expanded* state to a CompactOverlay SplitView.DisplayMode under
+            LeftCompact/LeftMinimal — this is documented, intentional
+            behavior for those two modes (a transient, light-dismiss nav
+            rail flyout), not a wiring bug, so there is no single property
+            tweak that keeps LeftCompact but stops it from overlaying.
+
+            "Left" is the only PaneDisplayMode that is inline
+            (Inline/CompactInline) in BOTH the collapsed and expanded state
+            — it has no overlay code path in NavigationView's template at
+            all, which is the actual property that matters here, not just
+            "does it look compact by default." Setting IsPaneOpen="False"
+            reproduces the same starts-collapsed appearance LeftCompact had,
+            while toggling the hamburger now pushes the Frame open (Inline)
+            instead of floating over it.
+
+            Deliberately NOT fixed by reaching into NavigationView's control
+            template to force its internal SplitView.DisplayMode directly:
+            NavigationView reassigns that itself on every pane-state change
+            as part of its own state machine, so a one-time external
+            override would very likely be silently reverted the next time
+            the pane toggles — an unreliable fix for a control this
+            stateful, not a real one. "Auto" was considered too — it only
+            switches between the same Left/LeftCompact/LeftMinimal behaviors
+            above based on window width, so it doesn't add anything over
+            just picking Left directly, and would make the collapsed-by-
+            default guarantee width-dependent instead of explicit.
+        -->
+        <!--
+            Background is set explicitly here, matching the root Grid's
+            ApplicationPageBackgroundThemeBrush — found during review of the
+            push-not-overlay fix above: NavigationView had no local
+            Background value, so it fell back to its own default template
+            brush, not guaranteed to equal ApplicationPageBackgroundThemeBrush.
+            That mismatch was invisible only by coincidence before the Light
+            theme fix (session history above) replaced a uniform hardcoded
+            black with real theme-aware brushes — with real, non-identical
+            brushes in play, the pane-width animation exposed the gap as a
+            brief flash of the wrong-colored surface. Background on the
+            control fills the whole NavigationView rectangle in its default
+            template (behind both the pane and content regions), so setting
+            just this one property is enough to cover any transient gap the
+            animation exposes between them — the Frame below gets the same
+            brush too, for the content side specifically.
+
+            NavigationView.PaneBackground was tried first, specifically to
+            target the pane's own fill — reverted after it reproducibly
+            crashed the WinAppSDK 1.6.250205002 XAML compiler
+            (XamlCompiler.exe exits 1 with no diagnostic output at all,
+            confirmed by bisecting this file property-by-property against a
+            clean rebuild) — not a real/usable property in this SDK version,
+            whatever the underlying cause. Do not reintroduce it without
+            confirming a newer WindowsAppSDK actually accepts it; Background
+            alone is what's proven to compile and to visually cover the pane
+            area in this template.
         -->
         <NavigationView Grid.Row="1"
                         x:Name="Nav"
+                        Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
                         IsSettingsVisible="True"
                         IsBackButtonVisible="Collapsed"
-                        PaneDisplayMode="LeftCompact"
+                        PaneDisplayMode="Left"
+                        IsPaneOpen="False"
                         SelectionChanged="OnNavSelectionChanged">
             <NavigationView.MenuItems>
-                <NavigationViewItem Content="Duplicates" Tag="Duplicates">
+                <NavigationViewItem Content="{loc:Loc Key=Nav.Duplicates}" Tag="Duplicates">
                     <NavigationViewItem.Icon>
                         <SymbolIcon Symbol="Copy"/>
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem Content="Quality" Tag="Quality">
+                <NavigationViewItem Content="{loc:Loc Key=Nav.Quality}" Tag="Quality">
                     <NavigationViewItem.Icon>
                         <SymbolIcon Symbol="Filter"/>
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem Content="Organization" Tag="Organization">
+                <NavigationViewItem Content="{loc:Loc Key=Nav.Organization}" Tag="Organization">
                     <NavigationViewItem.Icon>
                         <SymbolIcon Symbol="Folder"/>
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
             </NavigationView.MenuItems>
-            <Frame x:Name="ContentFrame"/>
+            <Frame x:Name="ContentFrame"
+                   Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"/>
         </NavigationView>
     </Grid>
 </Window>

@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using ImageCleanup.App.Services;
+using ImageCleanup.Core.Grouping;
 using ImageCleanup.Core.Quality;
 using ImageCleanup.Data.Repositories;
 using ImageCleanup.Data.Services;
@@ -26,7 +27,7 @@ public sealed class QualityViewModel : INotifyPropertyChanged
 
     // ── Observable state ─────────────────────────────────────────────────────
 
-    private string _statusText = "Select a folder above to review image quality.";
+    private string _statusText = LocalizationService.Current.GetString("Quality.InitialStatus");
     public string StatusText
     {
         get => _statusText;
@@ -46,7 +47,7 @@ public sealed class QualityViewModel : INotifyPropertyChanged
 
     public bool HasStagedItems => StagedItems.Count > 0;
     public Visibility StagingPanelVisibility => StagedItems.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-    public string StagedCountText => $"Review Staged Changes ({StagedItems.Count})";
+    public string StagedCountText => LocalizationService.Current.GetString("Common.StagedCountText", StagedItems.Count);
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -82,15 +83,15 @@ public sealed class QualityViewModel : INotifyPropertyChanged
         foreach (var r in sorted)
         {
             // Default action is None — nothing pre-staged; the user decides per file.
-            var fa = new FileActionViewModel(r.Id, r.FilePath, initialAction: "None", blurScore: r.BlurScore);
+            var fa = new FileActionViewModel(r.Id, r.FilePath, initialAction: ActionType.None, blurScore: r.BlurScore);
             fa.ActionChanged = OnFileActionChanged;
             RequestThumbnail(fa);
             Files.Add(fa);
         }
 
         StatusText = sorted.Count == 0
-            ? "No files with a quality score to review yet."
-            : $"{sorted.Count} file(s) with a quality score, sorted blurriest first.";
+            ? LocalizationService.Current.GetString("Quality.NoScoredFiles")
+            : LocalizationService.Current.GetString("Quality.FilesScored", sorted.Count);
     }
 
     // ── Staging callbacks ─────────────────────────────────────────────────────
@@ -106,13 +107,13 @@ public sealed class QualityViewModel : INotifyPropertyChanged
             fa.StagingId = null;
         }
 
-        // Create a staging row only for actionable choices — "Keep" and "None"
+        // Create a staging row only for actionable choices — Keep and None
         // both mean "do nothing to this file" and have no staged action.
-        if (fa.SelectedAction is "Delete" or "Move")
+        if (fa.SelectedActionType is ActionType.Delete or ActionType.Move)
         {
-            var sid = _stagingRepo.StageAction(fa.FileRecordId, fa.SelectedAction, null, "Flagged in Quality review");
+            var sid = _stagingRepo.StageAction(fa.FileRecordId, fa.SelectedActionType.ToStagingValue(), null, "Flagged in Quality review");
             fa.StagingId = sid;
-            var staged = new StagingEntryViewModel(sid, fa.FilePath, fa.SelectedAction);
+            var staged = new StagingEntryViewModel(sid, fa.FilePath, fa.SelectedActionType);
             RequestThumbnail(staged);
             StagedItems.Add(staged);
         }
@@ -145,13 +146,14 @@ public sealed class QualityViewModel : INotifyPropertyChanged
     public async Task<CommitResult> CommitStagedChangesAsync()
     {
         IsIdle = false;
-        StatusText = "Committing changes…";
+        var loc = LocalizationService.Current;
+        StatusText = loc.GetString("Common.CommittingStatus");
         try
         {
             // Flush Move target paths from TextBoxes into staging rows
             foreach (var fa in Files)
             {
-                if (fa.SelectedAction == "Move" && fa.StagingId.HasValue)
+                if (fa.SelectedActionType == ActionType.Move && fa.StagingId.HasValue)
                     _stagingRepo.UpdateTargetPath(fa.StagingId.Value, fa.TargetPath);
             }
 
@@ -163,13 +165,13 @@ public sealed class QualityViewModel : INotifyPropertyChanged
             await _scanSession.RefreshAsync();
 
             StatusText = result.Failed == 0
-                ? $"Done — {result.Succeeded} file(s) processed."
-                : $"Done — {result.Succeeded} succeeded, {result.Failed} failed.";
+                ? loc.GetString("Common.CommitDoneAll", result.Succeeded)
+                : loc.GetString("Common.CommitDonePartial", result.Succeeded, result.Failed);
             return result;
         }
         catch (Exception ex)
         {
-            StatusText = $"Commit failed: {ex.Message}";
+            StatusText = loc.GetString("Common.CommitFailedStatus", ex.Message);
             return new CommitResult();
         }
         finally
@@ -177,6 +179,20 @@ public sealed class QualityViewModel : INotifyPropertyChanged
             IsIdle = true;
         }
     }
+
+    // ── Single-photo view ────────────────────────────────────────────────────
+
+    private const int DetailThumbnailMaxDimension = 320;
+
+    /// <summary>
+    /// Returns a byte-generating delegate for SinglePhotoDialog's "View
+    /// Photo" — same 320px size/ThumbnailCache-entry convention Duplicates'
+    /// GroupDetailDialog already uses, kept as its own cache key (separate
+    /// from the row's own default-size Thumbnail) so a changed file
+    /// regenerates independently of the smaller preview.
+    /// </summary>
+    public Func<byte[]?> GetDetailThumbnailProvider(string filePath) =>
+        () => _thumbnailCache.GetOrCreateThumbnail(filePath, GetLastModified(filePath), DetailThumbnailMaxDimension);
 
     // ── Private helpers ───────────────────────────────────────────────────────
 

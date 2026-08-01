@@ -12,8 +12,27 @@ namespace ImageCleanup.Core.Organization;
 /// </summary>
 public static class OrganizationPlanner
 {
-    public static OrganizationPlan BuildHierarchy(IEnumerable<ImageRecord> records)
+    /// <summary>
+    /// Builds the plan. <paramref name="categoryFolderName"/> resolves a
+    /// MetadataCategory to the folder name used for BOTH the real on-disk
+    /// path (PlannedFile.TargetFolder) and the display label
+    /// (CategoryGroup.Label) — omit it (or pass null) to get the original
+    /// behavior, Category.ToString() ("Photo"/"NoMetadata"), which is what
+    /// every existing caller/test still gets automatically. A caller can
+    /// supply a localized name (e.g. from LocalizationService) instead;
+    /// see the App layer's OrganizationViewModel for that wiring, and the
+    /// localization-infrastructure session notes in CLAUDE.md for the
+    /// Windows-folder-name-safety considerations that come with actually
+    /// translating these — CJK text itself is fine as a folder name, but
+    /// any translated value must still avoid characters Windows forbids in
+    /// folder names.
+    /// </summary>
+    public static OrganizationPlan BuildHierarchy(
+        IEnumerable<ImageRecord> records,
+        Func<MetadataCategory, string>? categoryFolderName = null)
     {
+        var resolveCategoryName = categoryFolderName ?? (category => category.ToString());
+
         var classified = records
             .Select(r => (
                 Record: r,
@@ -38,13 +57,15 @@ public static class OrganizationPlanner
                             .OrderBy(g => g.Key)
                             .Select(categoryGroup =>
                             {
-                                var targetFolder = $"{yearGroup.Key:D4}/{FormatMonthFolder(monthGroup.Key)}/{categoryGroup.Key}";
+                                var categoryName = resolveCategoryName(categoryGroup.Key);
+                                var targetFolder = $"{yearGroup.Key:D4}/{FormatMonthFolder(monthGroup.Key)}/{categoryName}";
                                 var files = ResolveFileNames(
                                     categoryGroup.Select(x => x.Record),
                                     targetFolder);
                                 return new CategoryGroup
                                 {
                                     Category = categoryGroup.Key,
+                                    Label    = categoryName,
                                     Files    = files,
                                 };
                             })

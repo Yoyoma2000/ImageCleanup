@@ -2,7 +2,8 @@
     x:Class="ImageCleanup.App.Views.QualityPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:viewmodels="using:ImageCleanup.App.ViewModels">
+    xmlns:viewmodels="using:ImageCleanup.App.ViewModels"
+    xmlns:loc="using:ImageCleanup.App.Localization">
 
     <Grid RowDefinitions="Auto,*,Auto" Padding="16">
 
@@ -23,7 +24,7 @@
             </ListView.ItemContainerStyle>
             <ListView.ItemTemplate>
                 <DataTemplate x:DataType="viewmodels:FileActionViewModel">
-                    <Grid ColumnDefinitions="72,*,80,140,Auto" Margin="0,2">
+                    <Grid ColumnDefinitions="72,*,80,140,Auto,Auto" Margin="0,2">
                         <!-- Thumbnail preview -->
                         <Image Grid.Column="0"
                                Source="{x:Bind Thumbnail, Mode=OneWay}"
@@ -45,7 +46,7 @@
                                    Margin="8,0"
                                    FontSize="12"
                                    Opacity="0.7"
-                                   ToolTipService.ToolTip="BlurScore (Laplacian variance) — lower means blurrier"/>
+                                   ToolTipService.ToolTip="{loc:Loc Key=Quality.BlurScoreTooltip}"/>
                         <!--
                             Action picker: None/Keep/Delete/Move, default None.
                             Bound via SelectedIndex (not SelectedItem) — this
@@ -56,19 +57,35 @@
                             list). SelectedIndex has no ItemsSource item to
                             re-match on reuse, so it isn't affected.
                         -->
+                        <!--
+                            VerticalAlignment="Center" is required here — without
+                            it the ComboBox defaults to Stretch and grows to fill
+                            the full 64px row height (set by the thumbnail), which
+                            renders as visibly misaligned against the single-line
+                            path/BlurScore text next to it. DuplicatesPage's
+                            equivalent ComboBox already sets this; this row didn't.
+                        -->
                         <ComboBox Grid.Column="3"
                                   Margin="8,0"
                                   ItemsSource="{x:Bind AvailableActions}"
                                   SelectedIndex="{x:Bind SelectedActionIndex, Mode=TwoWay}"
                                   FontSize="12"
-                                  HorizontalAlignment="Stretch"/>
+                                  HorizontalAlignment="Stretch"
+                                  VerticalAlignment="Center"/>
                         <!-- Move target path (only visible when Move selected) -->
                         <TextBox Grid.Column="4"
                                  Width="220"
-                                 PlaceholderText="Destination path…"
+                                 PlaceholderText="{loc:Loc Key=Common.DestinationPathPlaceholder}"
                                  Text="{x:Bind TargetPath, Mode=TwoWay}"
                                  Visibility="{x:Bind MoveTargetVisibility, Mode=OneWay}"
                                  FontSize="12"/>
+                        <Button Grid.Column="5"
+                                Content="{loc:Loc Key=Common.ViewPhotoButton}"
+                                Click="OnViewPhotoClick"
+                                Tag="{x:Bind}"
+                                Margin="8,0,12,0"
+                                FontSize="11"
+                                Padding="8,3"/>
                     </Grid>
                 </DataTemplate>
             </ListView.ItemTemplate>
@@ -92,7 +109,7 @@
                     <TextBlock Text="{x:Bind ViewModel.StagedCountText, Mode=OneWay}"
                                FontWeight="SemiBold"
                                VerticalAlignment="Center"/>
-                    <Button Content="Commit Changes"
+                    <Button Content="{loc:Loc Key=Common.CommitChangesButton}"
                             Click="OnCommitClick"
                             IsEnabled="{x:Bind ViewModel.IsIdle, Mode=OneWay}"
                             Style="{StaticResource AccentButtonStyle}"/>
@@ -126,7 +143,7 @@
                                            VerticalAlignment="Center"
                                            FontSize="12"/>
                                 <Button Grid.Column="3"
-                                        Content="Remove"
+                                        Content="{loc:Loc Key=Common.RemoveButton}"
                                         Tag="{x:Bind StagingId}"
                                         Click="OnRemoveStagingClick"
                                         FontSize="11"

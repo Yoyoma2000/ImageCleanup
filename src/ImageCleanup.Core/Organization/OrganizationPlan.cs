@@ -25,8 +25,14 @@ public sealed class CategoryGroup
 {
     public MetadataCategory Category { get; init; }
 
-    /// <summary>Display label for a future TreeView node, e.g. "Photo".</summary>
-    public string Label => Category.ToString();
+    /// <summary>
+    /// Display/folder label, e.g. "Photo" — defaults to Category.ToString()
+    /// but can be overridden (see OrganizationPlanner.BuildHierarchy's
+    /// categoryFolderName parameter) so a caller can supply a localized
+    /// name. This is the same string used for the real on-disk folder name
+    /// (see PlannedFile.TargetFolder), not just display.
+    /// </summary>
+    public string Label { get; init; } = string.Empty;
 
     public IReadOnlyList<PlannedFile> Files { get; init; } = [];
 

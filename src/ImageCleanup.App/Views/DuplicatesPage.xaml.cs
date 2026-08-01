@@ -1,5 +1,6 @@
 using ImageCleanup.App.Services;
 using ImageCleanup.App.ViewModels;
+using ImageCleanup.Data.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -26,13 +27,15 @@ public sealed partial class DuplicatesPage : Page
 
     private async void OnCommitClick(object sender, RoutedEventArgs e)
     {
+        var loc = LocalizationService.Current;
+
         // Confirmation dialog
         var confirm = new ContentDialog
         {
-            Title             = "Commit Changes",
-            Content           = $"This will move {ViewModel.StagedItems.Count} file(s) to the Recycle Bin or a new location. Continue?",
-            PrimaryButtonText = "Commit",
-            CloseButtonText   = "Cancel",
+            Title             = loc.GetString("Common.CommitConfirmDialog.Title"),
+            Content           = loc.GetString("Common.CommitConfirmDialog.Message", ViewModel.StagedItems.Count),
+            PrimaryButtonText = loc.GetString("Common.CommitButton"),
+            CloseButtonText   = loc.GetString("Common.CancelButton"),
             XamlRoot          = this.XamlRoot,
         };
 
@@ -44,9 +47,9 @@ public sealed partial class DuplicatesPage : Page
         // Summary dialog
         var summary = new ContentDialog
         {
-            Title           = "Commit Complete",
+            Title           = loc.GetString("Common.CommitCompleteDialog.Title"),
             Content         = result.Summary,
-            CloseButtonText = "OK",
+            CloseButtonText = loc.GetString("Common.OkButton"),
             XamlRoot        = this.XamlRoot,
         };
         await summary.ShowAsync();

@@ -11,7 +11,17 @@ public sealed class FileActionViewModel : INotifyPropertyChanged
 {
     private readonly DispatcherQueue _dispatcher = DispatcherQueue.GetForCurrentThread();
 
-    public IReadOnlyList<string> AvailableActions { get; } = ["None", KeepSelector.KeepAction, "Delete", "Move"];
+    /// <summary>Index order backing both AvailableActions and SelectedActionIndex — None/Keep/Delete/Move.</summary>
+    private static readonly ActionType[] ActionOrder = [ActionType.None, ActionType.Keep, ActionType.Delete, ActionType.Move];
+
+    /// <summary>
+    /// Localized display text for the ComboBox, in ActionOrder — resolved
+    /// once per instance (a fresh scan/rebuild creates fresh instances, so
+    /// this reflects whatever language was active at that time; see
+    /// LocalizationService's remarks on restart-required for already-
+    /// rendered content). Never compared in logic — see SelectedActionType.
+    /// </summary>
+    public IReadOnlyList<string> AvailableActions { get; } = ActionOrder.Select(ActionDisplay.GetDisplayText).ToList();
 
     public int FileRecordId { get; init; }
     public string FilePath { get; init; } = string.Empty;
@@ -22,8 +32,8 @@ public sealed class FileActionViewModel : INotifyPropertyChanged
     /// <summary>Display-friendly BlurScore for XAML binding without a converter.</summary>
     public string BlurScoreDisplay => BlurScore.HasValue ? BlurScore.Value.ToString("F1") : "—";
 
-    /// <summary>True when this file is the group's current keep choice (SelectedAction == Keep).</summary>
-    public bool IsSuggested => _selectedAction == KeepSelector.KeepAction;
+    /// <summary>True when this file is the group's current keep choice (SelectedActionType == Keep).</summary>
+    public bool IsSuggested => _selectedActionType == ActionType.Keep;
 
     private ImageSource? _thumbnail;
     public ImageSource? Thumbnail
@@ -56,19 +66,27 @@ public sealed class FileActionViewModel : INotifyPropertyChanged
     // action now (see AvailableActions), so the ComboBox itself is always shown — only
     // the small star badge/border track whether this file is the current keep choice.
     public Visibility SuggestedBadgeVisibility => IsSuggested ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility MoveTargetVisibility     => _selectedAction == "Move" ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility MoveTargetVisibility     => _selectedActionType == ActionType.Move ? Visibility.Visible : Visibility.Collapsed;
 
     /// <summary>Highlights the current keep-choice file with a visible border in the detail view.</summary>
     public Thickness KeepBorderThickness => IsSuggested ? new Thickness(3) : new Thickness(0);
 
-    private string _selectedAction;
-    public string SelectedAction
+    private ActionType _selectedActionType;
+
+    /// <summary>
+    /// The stable, language-independent action — this is what business
+    /// logic (OnFileActionChanged, KeepSelector, CommitService via
+    /// ActionDisplay.ToStagingValue) reads/compares. Never compare display
+    /// text against a literal like "Delete" — that text is localized and
+    /// will not match once a non-Dev language is active.
+    /// </summary>
+    public ActionType SelectedActionType
     {
-        get => _selectedAction;
+        get => _selectedActionType;
         set
         {
-            if (_selectedAction == value) return;
-            _selectedAction = value;
+            if (_selectedActionType == value) return;
+            _selectedActionType = value;
             Notify();
             Notify(nameof(SelectedActionIndex));
             Notify(nameof(MoveTargetVisibility));
@@ -80,30 +98,25 @@ public sealed class FileActionViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// Index-based mirror of <see cref="SelectedAction"/> for binding to
-    /// ComboBox.SelectedIndex instead of SelectedItem. A virtualizing
+    /// Index-based mirror of <see cref="SelectedActionType"/> for binding to
+    /// ComboBox.SelectedIndex — every action ComboBox in the app binds this,
+    /// not SelectedItem/display text, for two reasons: a virtualizing
     /// ListView/GridView reusing a container for a different
     /// FileActionViewModel can leave a SelectedItem-bound ComboBox showing
-    /// blank (WinUI has to re-match the new SelectedAction string against
-    /// its ItemsSource by value on reuse, and that match doesn't always
-    /// re-run reliably) — SelectedIndex is a plain int with nothing to
-    /// match, so it isn't subject to that class of bug.
+    /// blank on reuse (see Quality's original ComboBox-blanking bug fix),
+    /// and — now that AvailableActions holds localized display strings
+    /// rather than stable values — SelectedItem would have to reverse-map a
+    /// translated string back to an ActionType, which SelectedIndex avoids
+    /// needing entirely.
     /// </summary>
     public int SelectedActionIndex
     {
-        get => IndexOf(AvailableActions, _selectedAction);
+        get => Array.IndexOf(ActionOrder, _selectedActionType);
         set
         {
-            if (value < 0 || value >= AvailableActions.Count) return;
-            SelectedAction = AvailableActions[value];
+            if (value < 0 || value >= ActionOrder.Length) return;
+            SelectedActionType = ActionOrder[value];
         }
-    }
-
-    private static int IndexOf(IReadOnlyList<string> list, string value)
-    {
-        for (var i = 0; i < list.Count; i++)
-            if (list[i] == value) return i;
-        return -1;
     }
 
     private string? _targetPath;
@@ -120,27 +133,27 @@ public sealed class FileActionViewModel : INotifyPropertyChanged
 
     /// <summary>Duplicates: every group member defaults to Delete except the suggested keep file.</summary>
     public FileActionViewModel(int fileRecordId, string filePath, bool isSuggested)
-        : this(fileRecordId, filePath, isSuggested ? KeepSelector.KeepAction : "Delete")
+        : this(fileRecordId, filePath, isSuggested ? ActionType.Keep : ActionType.Delete)
     {
     }
 
-    /// <summary>Quality (and anything else needing an explicit default action, e.g. "None"): no per-group Keep conflict resolution applies here — that logic lives in DuplicatesViewModel, not this class.</summary>
-    public FileActionViewModel(int fileRecordId, string filePath, string initialAction, double? blurScore = null)
+    /// <summary>Quality (and anything else needing an explicit default action, e.g. None): no per-group Keep conflict resolution applies here — that logic lives in DuplicatesViewModel, not this class.</summary>
+    public FileActionViewModel(int fileRecordId, string filePath, ActionType initialAction, double? blurScore = null)
     {
-        FileRecordId    = fileRecordId;
-        FilePath        = filePath;
-        BlurScore       = blurScore;
-        _selectedAction = initialAction;
+        FileRecordId      = fileRecordId;
+        FilePath          = filePath;
+        BlurScore         = blurScore;
+        _selectedActionType = initialAction;
     }
 
     /// <summary>Silently resets to None (e.g. when user removes the staging entry from the panel).</summary>
     internal void ResetToNone()
     {
-        _suppress       = true;
-        _selectedAction = "None";
-        StagingId       = null;
-        _suppress       = false;
-        Notify(nameof(SelectedAction));
+        _suppress            = true;
+        _selectedActionType  = ActionType.None;
+        StagingId            = null;
+        _suppress            = false;
+        Notify(nameof(SelectedActionType));
         Notify(nameof(SelectedActionIndex));
         Notify(nameof(MoveTargetVisibility));
         Notify(nameof(IsSuggested));

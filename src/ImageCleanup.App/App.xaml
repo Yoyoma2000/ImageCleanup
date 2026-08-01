@@ -7,6 +7,34 @@
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls"/>
             </ResourceDictionary.MergedDictionaries>
+
+            <!--
+                Dark-only override of the named ThemeResource NavigationView's
+                own default template pulls its pane background from, so the
+                pane reads as a slightly brighter, distinct surface from the
+                main content area in Dark theme (they currently render
+                identically). Deliberately NOT done by setting
+                NavigationView.PaneBackground on the control in MainWindow.xaml
+                — that specific dependency-property path reproducibly crashes
+                the WinAppSDK 1.6.250205002 XAML compiler with zero diagnostic
+                output (see MainWindow.xaml's own comment and CLAUDE.md).
+                Redefining the resource key here instead is a completely
+                different code path — a plain resource-dictionary entry, no
+                property-setter codegen involved at all — and isn't subject to
+                that crash; confirmed by a clean `rm -rf obj` rebuild after
+                adding this, same bisection discipline used to isolate the
+                PaneBackground crash in the first place. LayerFillColorDefaultBrush
+                is the same "one step brighter than page background" surface
+                already used elsewhere in this app (MainWindow's toolbar,
+                Duplicates/Quality's staging panels) for the same elevation
+                purpose. Light theme is untouched — only a "Dark" key is
+                defined below, so Light keeps NavigationView's normal default.
+            -->
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Dark">
+                    <StaticResource x:Key="NavigationViewDefaultPaneBackground" ResourceKey="LayerFillColorDefaultBrush"/>
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

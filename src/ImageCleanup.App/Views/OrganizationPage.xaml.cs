@@ -39,6 +39,18 @@ public sealed partial class OrganizationPage : Page
             ViewModel.RequestThumbnailsFor(node);
     }
 
+    private async void OnViewPhotoClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button btn || btn.Tag is not OrganizationNodeViewModel node || node.SourcePath is null)
+            return;
+
+        var dialog = new SinglePhotoDialog(node.SourcePath, ViewModel.GetDetailThumbnailProvider(node.SourcePath))
+        {
+            XamlRoot = this.XamlRoot,
+        };
+        await dialog.ShowAsync();
+    }
+
     /// <summary>
     /// A ThreeState CheckBox is required so a group node CAN render
     /// indeterminate (some but not all descendants selected), but that also
@@ -76,23 +88,20 @@ public sealed partial class OrganizationPage : Page
 
     private async void OnExecuteClick(object sender, RoutedEventArgs e)
     {
+        var loc = LocalizationService.Current;
+
         var selected = ViewModel.SelectedFileCount;
         var total    = ViewModel.PlannedFileCount;
         var countText = selected == total
-            ? $"{total} file(s)"
-            : $"{selected} of {total} file(s)";
+            ? loc.GetString("Organization.TotalFiles", total)
+            : loc.GetString("Organization.CountOfTotalFiles", selected, total);
 
         var confirm = new ContentDialog
         {
-            Title             = "Organize Files",
-            Content           =
-                $"This will MOVE {countText} on disk to:\n\n{ViewModel.DestinationFolder}\n\n" +
-                "This is a real file move, not a Recycle Bin operation — it is " +
-                "NOT reversible through the Recycle Bin. A move log will be " +
-                "written before anything is moved, in case you need to reverse " +
-                "it manually. Continue?",
-            PrimaryButtonText = "Move Files",
-            CloseButtonText   = "Cancel",
+            Title             = loc.GetString("Organization.OrganizeConfirmDialog.Title"),
+            Content           = loc.GetString("Organization.OrganizeConfirmDialog.Message", countText, ViewModel.DestinationFolder),
+            PrimaryButtonText = loc.GetString("Organization.OrganizeConfirmDialog.PrimaryButton"),
+            CloseButtonText   = loc.GetString("Common.CancelButton"),
             DefaultButton     = ContentDialogButton.Close,
             XamlRoot          = this.XamlRoot,
         };
@@ -104,9 +113,9 @@ public sealed partial class OrganizationPage : Page
 
         var summary = new ContentDialog
         {
-            Title           = "Organize Complete",
-            Content         = $"{result.Summary}\n\nMove log: {result.MoveLogPath}",
-            CloseButtonText = "OK",
+            Title           = loc.GetString("Organization.OrganizeCompleteDialog.Title"),
+            Content         = loc.GetString("Organization.OrganizeCompleteDialog.Message", result.Summary, result.MoveLogPath),
+            CloseButtonText = loc.GetString("Common.OkButton"),
             XamlRoot        = this.XamlRoot,
         };
         await summary.ShowAsync();
@@ -121,14 +130,16 @@ public sealed partial class OrganizationPage : Page
     /// </summary>
     private async void OnUndoMoveClick(object sender, RoutedEventArgs e)
     {
+        var loc = LocalizationService.Current;
+
         var logs = await ViewModel.GetAvailableMoveLogsAsync();
         if (logs.Count == 0)
         {
             var none = new ContentDialog
             {
-                Title           = "Undo a Previous Move",
-                Content         = "No move logs found — nothing to undo.",
-                CloseButtonText = "OK",
+                Title           = loc.GetString("Organization.NoMoveLogsDialog.Title"),
+                Content         = loc.GetString("Organization.NoMoveLogsDialog.Message"),
+                CloseButtonText = loc.GetString("Common.OkButton"),
                 XamlRoot        = this.XamlRoot,
             };
             await none.ShowAsync();
@@ -142,7 +153,8 @@ public sealed partial class OrganizationPage : Page
             // only here, at display time, so the picker shows "1:23 AM"
             // for a move made at 1:23 AM local rather than its UTC offset.
             ItemsSource = logs
-                .Select(l => $"{l.Timestamp.ToLocalTime():yyyy-MM-dd HH:mm:ss} — {l.FileCount} file(s) — {l.DestinationRoot}")
+                .Select(l => loc.GetString("Organization.MoveLogSummary",
+                    l.Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"), l.FileCount, l.DestinationRoot))
                 .ToList(),
             SelectionMode = ListViewSelectionMode.Single,
             SelectedIndex = 0,
@@ -150,10 +162,10 @@ public sealed partial class OrganizationPage : Page
 
         var pickDialog = new ContentDialog
         {
-            Title             = "Select a Move to Undo",
+            Title             = loc.GetString("Organization.SelectMoveDialog.Title"),
             Content           = listView,
-            PrimaryButtonText = "Undo Selected",
-            CloseButtonText   = "Cancel",
+            PrimaryButtonText = loc.GetString("Organization.SelectMoveDialog.PrimaryButton"),
+            CloseButtonText   = loc.GetString("Common.CancelButton"),
             DefaultButton     = ContentDialogButton.Close,
             XamlRoot          = this.XamlRoot,
         };
@@ -166,16 +178,11 @@ public sealed partial class OrganizationPage : Page
 
         var confirm = new ContentDialog
         {
-            Title             = "Undo Move",
-            Content           =
-                $"This will attempt to move {selectedLog.FileCount} file(s) back to their " +
-                $"original locations, reversing the move to:\n\n{selectedLog.DestinationRoot}\n" +
-                $"(logged {selectedLog.Timestamp.ToLocalTime():yyyy-MM-dd HH:mm:ss})\n\n" +
-                "Files that no longer exist at their moved location, or whose original " +
-                "location now has a different file, will be skipped rather than " +
-                "overwritten — see the summary after for exact counts. Continue?",
-            PrimaryButtonText = "Undo",
-            CloseButtonText   = "Cancel",
+            Title             = loc.GetString("Organization.UndoConfirmDialog.Title"),
+            Content           = loc.GetString("Organization.UndoConfirmDialog.Message",
+                selectedLog.FileCount, selectedLog.DestinationRoot, selectedLog.Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")),
+            PrimaryButtonText = loc.GetString("Organization.UndoConfirmDialog.PrimaryButton"),
+            CloseButtonText   = loc.GetString("Common.CancelButton"),
             DefaultButton     = ContentDialogButton.Close,
             XamlRoot          = this.XamlRoot,
         };
@@ -188,9 +195,9 @@ public sealed partial class OrganizationPage : Page
 
         var summary = new ContentDialog
         {
-            Title           = "Undo Complete",
+            Title           = loc.GetString("Organization.UndoCompleteDialog.Title"),
             Content         = result.Summary,
-            CloseButtonText = "OK",
+            CloseButtonText = loc.GetString("Common.OkButton"),
             XamlRoot        = this.XamlRoot,
         };
         await summary.ShowAsync();

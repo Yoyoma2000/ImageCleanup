@@ -1,0 +1,37 @@
+<ContentDialog
+    x:Class="ImageCleanup.App.Views.SinglePhotoDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:ImageCleanup.App.Localization"
+    Title="{loc:Loc Key=SinglePhoto.Title}"
+    CloseButtonText="{loc:Loc Key=Common.CloseButton}"
+    DefaultButton="Close">
+
+    <!--
+        Simpler counterpart to GroupDetailDialog: one file at a larger size,
+        no comparison grid, no per-file action ComboBox — used by Quality and
+        Organization, which each just need "show this one photo bigger", not
+        Duplicates' multi-file compare-and-choose-an-action flow. Deliberately
+        not bound to either caller's own ViewModel type (FileActionViewModel
+        for Quality, OrganizationNodeViewModel for Organization) — those two
+        differ and neither should have to know about the other just to share
+        this dialog. Instead the constructor takes a plain file path and a
+        Func<byte[]?> byte-generating delegate (the same delegate-injection
+        pattern already used throughout this codebase, e.g.
+        FileActionViewModel/OrganizationNodeViewModel/StagingEntryViewModel's
+        own RequestThumbnail(Func<byte[]?>)), so this dialog stays usable by
+        any future caller with nothing more than a path and a way to fetch
+        bytes for it.
+    -->
+    <StackPanel Spacing="8" HorizontalAlignment="Center">
+        <Image Source="{x:Bind Photo, Mode=OneWay}"
+               Width="320" Height="320"
+               Stretch="Uniform"/>
+        <TextBlock Text="{x:Bind FilePath}"
+                   TextWrapping="Wrap"
+                   FontSize="12"
+                   Opacity="0.85"
+                   HorizontalAlignment="Center"
+                   MaxWidth="320"/>
+    </StackPanel>
+</ContentDialog>

@@ -16,22 +16,21 @@ public sealed partial class SettingsPage : Page
         this.NavigationCacheMode = NavigationCacheMode.Enabled;
 
         var settingsService = App.Services.GetRequiredService<SettingsService>();
-        ViewModel = new SettingsViewModel(settingsService);
+        var localizationService = App.Services.GetRequiredService<LocalizationService>();
+        ViewModel = new SettingsViewModel(settingsService, localizationService);
 
         this.InitializeComponent();
     }
 
     private async void OnClearCacheClick(object sender, RoutedEventArgs e)
     {
+        var loc = LocalizationService.Current;
         var confirm = new ContentDialog
         {
-            Title             = "Clear Cache",
-            Content           =
-                "This deletes the scan cache. Nothing on disk is affected — the " +
-                "next time you scan any folder, it will take longer while every " +
-                "file is re-hashed and re-analyzed from scratch. Continue?",
-            PrimaryButtonText = "Clear Cache",
-            CloseButtonText   = "Cancel",
+            Title             = loc.GetString("Settings.ClearCacheConfirmDialog.Title"),
+            Content           = loc.GetString("Settings.ClearCacheConfirmDialog.Message"),
+            PrimaryButtonText = loc.GetString("Settings.ClearCacheButton"),
+            CloseButtonText   = loc.GetString("Common.CancelButton"),
             DefaultButton     = ContentDialogButton.Close,
             XamlRoot          = this.XamlRoot,
         };
@@ -44,18 +43,15 @@ public sealed partial class SettingsPage : Page
 
     private async void OnClearMoveHistoryClick(object sender, RoutedEventArgs e)
     {
+        var loc = LocalizationService.Current;
         var logCount = ViewModel.CountMoveLogs();
 
         var confirm = new ContentDialog
         {
-            Title             = "Clear Move History",
-            Content           =
-                $"This permanently deletes all {logCount} Organization move log(s). " +
-                "Unlike Clear Cache, this is NOT recoverable — any past Organization " +
-                "move you haven't undone yet can never be undone through the app " +
-                "again after this. Continue?",
-            PrimaryButtonText = "Clear Move History",
-            CloseButtonText   = "Cancel",
+            Title             = loc.GetString("Settings.ClearMoveHistoryConfirmDialog.Title"),
+            Content           = loc.GetString("Settings.ClearMoveHistoryConfirmDialog.Message", logCount),
+            PrimaryButtonText = loc.GetString("Settings.ClearMoveHistoryButton"),
+            CloseButtonText   = loc.GetString("Common.CancelButton"),
             DefaultButton     = ContentDialogButton.Close,
             XamlRoot          = this.XamlRoot,
         };

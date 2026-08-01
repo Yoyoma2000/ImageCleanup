@@ -23,4 +23,15 @@
     <ProjectReference Include="..\ImageCleanup.Core\ImageCleanup.Core.csproj" />
     <ProjectReference Include="..\ImageCleanup.Data\ImageCleanup.Data.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!--
+        App-authored translation dictionaries (dev/en/zh) — bundled content,
+        not user data, so they ship next to the exe rather than living under
+        %LOCALAPPDATA% the way settings.json does. LocalizationService reads
+        them from AppContext.BaseDirectory\Strings by default at runtime.
+    -->
+    <Content Include="Strings\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
 </Project>
