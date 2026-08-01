@@ -92,11 +92,17 @@
             </ListView.ItemTemplate>
         </ListView>
 
-        <!-- ── Staging review panel ────────────────────────────────────────── -->
+        <!--
+            ── Staging review panel ──────────────────────────────────────────
+            LayerFillColorDefaultBrush gives this panel a distinct surface
+            from the plain page background above, so it reads as its own
+            region rather than an unbroken continuation of the results list.
+        -->
         <Border Grid.Row="2"
+                Background="{ThemeResource LayerFillColorDefaultBrush}"
                 BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
                 BorderThickness="0,1,0,0"
-                Padding="0,8,0,0"
+                Padding="12,8"
                 Margin="0,8,0,0"
                 Visibility="{x:Bind ViewModel.StagingPanelVisibility, Mode=OneWay}">
             <StackPanel Spacing="6">

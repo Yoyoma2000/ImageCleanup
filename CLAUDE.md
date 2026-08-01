@@ -858,34 +858,98 @@ ThumbnailCache-backed preview thumbnails.
     destination root standing, and a partial reversal (one file
     deliberately left un-reversed via a simulated SkippedSourceOccupied)
     retains the shared Category folder since it's not actually empty.
+- Settings page — replaces the NavigationView gear placeholder with a real
+  page. `MainWindow.xaml`'s NavigationView now has `IsSettingsVisible="True"`;
+  `MainWindow.xaml.cs`'s `OnNavSelectionChanged` checks
+  `args.IsSettingsSelected` first and navigates to the new SettingsPage
+  before falling through to the existing Tag-based switch for the other
+  three items (that switch and its default case are otherwise unchanged).
+  - Data.Models.AppSettings (`Theme` — enum `AppTheme { System, Light,
+    Dark }`, defaults to System) + Data.Services.SettingsService
+    (load/save JSON at `%LOCALAPPDATA%\ImageCleanup\settings.json`, same
+    layer/style as OrganizationExecutor/ThumbnailCache — constructor takes
+    an optional directory override for testability, defaults to the real
+    LocalApplicationData path otherwise). A missing or corrupt settings
+    file both just fall back to `new AppSettings()` (System theme) rather
+    than throwing — same "don't fail the app over a non-critical read"
+    philosophy as OrganizationUndoService's corrupt-log skip. 3 new Data
+    tests (SettingsServiceTests): no-file-yet defaults, save-then-load
+    round-trip, corrupt-file fallback.
+  - App.xaml.cs registers `SettingsService` alongside `ScanSessionService`
+    in the DI container, loads it once in `OnLaunched` (before
+    `_window.Activate()`, so the saved theme is applied ahead of first
+    paint — no flash of the wrong theme), and exposes a static
+    `App.ApplyTheme(AppTheme)` helper that sets `RequestedTheme` on the
+    shell window's root `FrameworkElement` (`ElementTheme.Light/Dark`, or
+    `ElementTheme.Default` for System to defer back to the OS). WinUI
+    re-themes that element and every descendant live — no restart
+    required, confirmed this is the standard mechanism (not something
+    that needs its own test; it's a single framework property set).
+  - App layer: SettingsViewModel wraps SettingsService — `Theme` setter
+    saves to disk and calls `App.ApplyTheme` immediately on every change;
+    `ThemeIndex` is an int mirror for `RadioButtons.SelectedIndex`
+    binding, same reasoning as `FileActionViewModel.SelectedActionIndex`
+    (avoids any by-value re-match against an ItemsSource). `ClearCache()`
+    deletes `cache.db` directly (best-effort, catches and reports via
+    `StatusText` rather than throwing); `ClearMoveHistory()` deletes every
+    `move-log_*.json` under the move-logs directory; `CountMoveLogs()`
+    backs the confirmation dialog's "N move log(s)" wording. SettingsPage
+    (RadioButtons for the three theme options, two buttons) mirrors the
+    existing confirm-before/act-after ContentDialog pattern used
+    throughout — Clear Move History's dialog is worded distinctly
+    stronger ("NOT recoverable") than Clear Cache's routine confirm, per
+    the difference in what each action actually costs the user.
+  - Not done in this pass, out of scope for what was asked: no
+    last-scanned-folder persistence (AppSettings only carries Theme so
+    far — see "No settings/preferences persistence" below, still open for
+    anything beyond theme).
+  - **Bug fix, same session: Light theme rendered greyish/broken (Dark
+    was fine).** Root cause: `MainWindow.xaml`'s root `Grid` had no
+    explicit `Background` at all. **Gotcha worth remembering for any
+    future WinUI window/dialog added to this app: an unpackaged WinUI 3
+    `Window` has no default page background of its own** (no Mica/
+    backdrop, no implicit fill) — without one, the root renders as
+    whatever the composition swapchain's clear surface is, which
+    happened to look passable under Dark (close to black-on-black) but
+    showed up as a broken grey smear under Light, since nothing was
+    actually painting a light surface. Fixed by setting
+    `Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"`
+    on that root Grid — the standard WinUI token for "the app's base
+    background," which flips correctly with `RequestedTheme`. Same pass
+    also: replaced two hardcoded `Foreground="White"` badges
+    (GroupDetailDialog's "★ Keep" badge, OrganizationPage's "renamed"
+    badge) with `{ThemeResource TextOnAccentFillColorPrimaryBrush}` (the
+    correct token for text on an accent-filled surface — confirmed via
+    grep this was the only remaining hardcoded color anywhere in the App
+    project); and added a couple of distinct theme-aware surface levels
+    instead of everything sitting on one flat background — the shared
+    folder-selection toolbar and the Duplicates/Quality staging panels
+    now use `LayerFillColorDefaultBrush`, and GroupDetailDialog's
+    per-file cards use `CardBackgroundFillColorDefaultBrush`. Confirmed
+    `App.ApplyTheme` is the only place `RequestedTheme` is set anywhere
+    in the app (grepped), applied to the actual visual-tree root
+    (`ShellWindow.Content`), so it correctly cascades to every page and
+    every `ContentDialog` sharing that `XamlRoot` — nothing overrides it
+    independently. NavigationView's `SymbolIcon`s were confirmed (not
+    changed) to already inherit theme-aware foreground from WinUI's
+    default styling, with no local override anywhere. XAML/resource-only
+    — no ViewModel or logic changes, no new tests (nothing here is
+    Core/Data-testable; see the manual verification checklist below).
 
 ### Known gaps / not yet started
 **Current priority order for what's next**, now that Duplicates/Quality/
-Organization are all feature-complete:
-1. **Settings page** — scoped but not yet built. Planned actions: "Clear
-   Cache" (deletes `%LOCALAPPDATA%\ImageCleanup\cache.db`, forcing a full
-   rescan next time — low-risk/recoverable) and "Clear Move History"
-   (deletes `%LOCALAPPDATA%\ImageCleanup\move-logs\*.json` — one-way,
-   removes the undo safety net for every past move, so needs a
-   distinctly stronger warning than Clear Cache's routine confirm).
-   NavigationView already has `IsSettingsVisible="False"` in
-   MainWindow.xaml — flipping that on gets the standard built-in
-   gear-icon Settings entry for free rather than adding a fourth/fifth
-   custom NavigationViewItem. Paths confirmed via ScanSessionService/
-   OrganizationExecutor's own default-directory logic.
-2. **Localization** — not started. Plain-English text mode and Chinese
+Organization/Settings are all feature-complete:
+1. **Localization** — not started. Plain-English text mode and Chinese
    language support have been raised but no infrastructure (resource
    files, a language switcher, string externalization) exists yet.
-3. **Theme toggle (light/dark)** — not started. The app currently follows
-   whatever WinUI/Windows defaults to; no in-app light/dark switch exists.
-4. **General UI polish** — not started. Specific items raised: per-page
+2. **General UI polish** — not started. Specific items raised: per-page
    accent coloring (currently uniform/black across Duplicates/Quality/
    Organization rather than each page having its own accent) and a
    sticky/always-visible "Select Folder" bar.
-5. **Distribution/.exe packaging** — not started (see the "No installer
+3. **Distribution/.exe packaging** — not started (see the "No installer
    or distribution path" gap below for the current constraint in detail).
-6. **Video duplicate/near-duplicate detection** — not started at all,
-   and deliberately deferred until after 1–5 above per current priority
+4. **Video duplicate/near-duplicate detection** — not started at all,
+   and deliberately deferred until after 1–3 above per current priority
    order. The app only scans image files today (see ScanSessionService's
    ImageExtensions list); no video sampling/hashing exists yet despite
    Core being scoped for it in the Architecture section below.
@@ -916,9 +980,10 @@ Other known gaps (not on the roadmap above, but still open):
   inaccessible/missing directories — see Core.IO.ImageFileEnumerator) but
   not stress-tested at large scale (tens of thousands of files);
   performance at that scale is unverified.
-- **No settings/preferences persistence** — nothing is remembered between
-  launches (e.g. the last-scanned folder), so every session starts from
-  "Select Folder."
+- **No settings/preferences persistence beyond theme** — AppSettings/
+  SettingsService now persist Theme (see Settings page above), but nothing
+  else is remembered between launches (e.g. the last-scanned folder), so
+  every session still starts from "Select Folder."
 - Orphaned FileCacheRepository rows after an Organization move — no cache
   cleanup for moved files' old paths (harmless today; worth revisiting
   alongside the thumbnail-cache-eviction gap below if it bloats over time).
@@ -1269,17 +1334,89 @@ When run:
     before organizing, or simulate a skip during undo per the checklist
     above) — confirm a folder that still has a file left in it is NOT
     deleted.
-- **Settings page — scoped only, not yet implemented** (see chat history
-  for the full write-up if picking this up): would need a new page for
-  "Clear move history" (deletes `%LOCALAPPDATA%\ImageCleanup\move-logs\*`)
-  and "Clear cache" (deletes `%LOCALAPPDATA%\ImageCleanup\cache.db`,
-  forcing a full rescan next time). NavigationView already has
-  `IsSettingsVisible="False"` in MainWindow.xaml — flipping that on gets
-  the standard built-in gear-icon Settings entry for free instead of
-  adding a fourth custom NavigationViewItem, which is probably the more
-  idiomatic choice here. "Clear cache" is low-risk/recoverable (rescan
-  regenerates it); "Clear move history" is one-way and removes the undo
-  safety net for every past move, so it needs a distinctly stronger
-  warning than a routine confirm dialog — likely calling out how many log
-  files/moves would be lost, similar in spirit to the "not reversible
-  through the Recycle Bin" wording already used for Organization moves.
+- **Settings page (new this session) — verify the gear icon, theme toggle,
+  and both maintenance actions.**
+  - Launch the app — confirm a gear-icon "Settings" entry appears at the
+    bottom of the NavigationView pane (the standard built-in entry, not a
+    custom item), and clicking it shows the new Settings page (Appearance
+    section with three theme radio buttons, Maintenance section with
+    Clear Cache / Clear Move History buttons).
+  - Theme toggle: click "Light", then "Dark", then "Use system setting" —
+    confirm the whole app's visuals (not just the Settings page) switch
+    immediately with no restart, and that switching back to Duplicates/
+    Quality/Organization shows the new theme applied there too.
+  - Close and relaunch the app after picking Light or Dark — confirm it
+    opens directly in that theme (no flash of the wrong theme first, and
+    no need to revisit Settings to reapply it) — this depends on
+    App.xaml.cs loading settings.json and calling ApplyTheme before
+    Activate().
+  - Clear Cache: click it, confirm the dialog wording, confirm, then
+    re-scan a previously-scanned folder — confirm it takes noticeably
+    longer (full re-hash) rather than being an instant cache hit,
+    confirming `%LOCALAPPDATA%\ImageCleanup\cache.db` was actually
+    deleted and rebuilt.
+  - Clear Move History: perform an Organization move first (so at least
+    one move-log file exists), then open Clear Move History — confirm
+    the confirmation dialog states the correct log count and uses
+    noticeably stronger "not recoverable" wording than Clear Cache's.
+    Confirm, then check `%LOCALAPPDATA%\ImageCleanup\move-logs\` is
+    empty, and that Organization's "Undo a Previous Move…" now reports
+    "no move logs found."
+  - Nav round-trip: visit Settings, change the theme, switch to
+    Duplicates/Quality/Organization and back to Settings — confirm the
+    selected radio button still reflects your last choice (NavigationCacheMode.Enabled
+    keeping SettingsViewModel alive, same as every other page).
+- **Light theme fix (new this session) — this is the main thing to
+  re-verify, since Light mode was reported as greyish/broken before this
+  pass. Root cause: MainWindow.xaml's root Grid had no explicit
+  Background at all — an unpackaged WinUI 3 Window has no default page
+  background of its own, so it was rendering as whatever the composition
+  swapchain's clear surface is, which happened to look plausible under
+  Dark but showed up as a broken grey smear under Light. Fixed by setting
+  `Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"` on
+  that root Grid, so it now genuinely repaints per theme rather than
+  silently falling through to a fallback surface. Also replaced two
+  hardcoded `Foreground="White"` badges (GroupDetailDialog's "★ Keep"
+  badge, OrganizationPage's "renamed" badge) with
+  `{ThemeResource TextOnAccentFillColorPrimaryBrush}` — the correct WinUI
+  token for text on an accent-filled surface — and added a couple of
+  distinct theme-aware surface levels that didn't exist before: the
+  shared folder-selection toolbar and both staging/review panels
+  (Duplicates, Quality) now use `LayerFillColorDefaultBrush` instead of
+  sitting directly on the bare window background, and each file card in
+  GroupDetailDialog now uses `CardBackgroundFillColorDefaultBrush`. No
+  ViewModel or logic changed — this was XAML/resource-only.**
+  - Switch to Light in Settings (or set Windows itself to Light and pick
+    "Use system setting") — confirm the whole window shows a clean white/
+    light background immediately, with no leftover grey/dark smear
+    anywhere (this is the headline regression to check).
+  - Check every page under Light: Duplicates, Quality, Organization,
+    Settings, and the shared "Select Folder" toolbar at the top — text
+    should be dark-on-light and clearly readable everywhere, not just in
+    some regions.
+  - Duplicates and Quality: stage at least one action so the staging/
+    review panel at the bottom becomes visible — confirm it reads as a
+    subtly distinct surface from the results list above it (not
+    identical, not jarring) in both Light and Dark.
+  - Duplicates: open "View Group" on any group — confirm each file's card
+    in the dialog shows a faint card-level surface distinct from the
+    dialog's own backdrop, in both themes, and that the "★ Keep" badge's
+    white-ish text is still clearly readable against the accent-colored
+    badge background in Light.
+  - Organization: find (or create) a renamed file in the tree — confirm
+    the "renamed" badge's text is still clearly readable against its
+    accent-colored background in Light.
+  - Collapse the NavigationView pane (hamburger toggle) under Light —
+    confirm the Copy/Filter/Folder/gear icons are still clearly visible
+    against the pane background (not washed out or invisible) — this was
+    a "confirm, don't break" check since the icons already inherit
+    theme-aware foreground from WinUI's default NavigationView styling
+    and nothing in this codebase overrides it.
+  - Toggle Light → Dark → Light a few times in a row without restarting —
+    confirm every region (toolbar, page content, staging panels, dialogs)
+    flips consistently every time, with nothing "stuck" showing the
+    previous theme's colors.
+  - Confirm Dark theme still looks exactly as good as it did before this
+    change — this pass added an explicit background and a couple of
+    surface brushes but didn't touch anything Dark-specific, so Dark
+    should be unaffected, not just "not worse."

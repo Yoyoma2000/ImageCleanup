@@ -4,20 +4,43 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="ImageCleanup">
 
-    <Grid RowDefinitions="Auto,*">
+    <!--
+        Explicit Background is required here: an unpackaged WinUI 3 Window
+        has no default page background of its own (no Mica/backdrop, no
+        implicit fill) — without this the root Grid renders as whatever the
+        composition swapchain's clear surface is, which happened to read as
+        "fine" under Dark (looks close to black-on-black) but showed up as a
+        broken grey smear under Light, since nothing was actually painting a
+        light surface. ApplicationPageBackgroundThemeBrush is the standard
+        WinUI token for "the app's base background" and flips correctly with
+        RequestedTheme (see App.ApplyTheme).
+    -->
+    <Grid RowDefinitions="Auto,*"
+          Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
 
-        <!-- ── Folder selection — shared across every page ────────────────── -->
-        <StackPanel Grid.Row="0"
-                    Orientation="Horizontal"
-                    Spacing="12"
-                    Padding="16,16,16,8">
-            <Button Content="Select Folder"
-                    Click="OnSelectFolderClick"
-                    IsEnabled="{x:Bind ScanSession.IsIdle, Mode=OneWay}"/>
-            <TextBlock Text="{x:Bind ScanSession.StatusText, Mode=OneWay}"
-                       VerticalAlignment="Center"
-                       TextWrapping="NoWrap"/>
-        </StackPanel>
+        <!--
+            ── Folder selection — shared across every page ──────────────────
+            LayerFillColorDefaultBrush gives this shared toolbar a subtly
+            distinct surface from the page content below (rather than every
+            region collapsing onto the same flat background), consistent
+            with the small set of elevation levels WinUI's theme resources
+            provide (Layer < Card < page background).
+        -->
+        <Border Grid.Row="0"
+                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                BorderThickness="0,0,0,1">
+            <StackPanel Orientation="Horizontal"
+                        Spacing="12"
+                        Padding="16,16,16,8">
+                <Button Content="Select Folder"
+                        Click="OnSelectFolderClick"
+                        IsEnabled="{x:Bind ScanSession.IsIdle, Mode=OneWay}"/>
+                <TextBlock Text="{x:Bind ScanSession.StatusText, Mode=OneWay}"
+                           VerticalAlignment="Center"
+                           TextWrapping="NoWrap"/>
+            </StackPanel>
+        </Border>
 
         <!--
             LeftCompact (not the previous "Left") is what gives the hamburger
@@ -30,7 +53,7 @@
         -->
         <NavigationView Grid.Row="1"
                         x:Name="Nav"
-                        IsSettingsVisible="False"
+                        IsSettingsVisible="True"
                         IsBackButtonVisible="Collapsed"
                         PaneDisplayMode="LeftCompact"
                         SelectionChanged="OnNavSelectionChanged">

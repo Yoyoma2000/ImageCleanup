@@ -109,7 +109,7 @@
                                     Visibility="{x:Bind RenamedBadgeVisibility}">
                                 <TextBlock Text="renamed"
                                            FontSize="11"
-                                           Foreground="White"/>
+                                           Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"/>
                             </Border>
                         </Grid>
                     </TreeViewItem>

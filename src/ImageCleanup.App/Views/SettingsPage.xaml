@@ -1,0 +1,43 @@
+<Page
+    x:Class="ImageCleanup.App.Views.SettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <StackPanel Padding="16" Spacing="24" MaxWidth="480" HorizontalAlignment="Left">
+
+        <StackPanel Spacing="8">
+            <TextBlock Text="Appearance" FontWeight="SemiBold" FontSize="16"/>
+            <RadioButtons x:Name="ThemeRadioButtons"
+                          SelectedIndex="{x:Bind ViewModel.ThemeIndex, Mode=TwoWay}">
+                <RadioButtons.Items>
+                    <x:String>Use system setting</x:String>
+                    <x:String>Light</x:String>
+                    <x:String>Dark</x:String>
+                </RadioButtons.Items>
+            </RadioButtons>
+            <TextBlock Text="Applies immediately — no restart needed."
+                       Opacity="0.7" FontSize="12"/>
+        </StackPanel>
+
+        <StackPanel Spacing="8">
+            <TextBlock Text="Maintenance" FontWeight="SemiBold" FontSize="16"/>
+
+            <StackPanel Spacing="4">
+                <Button Content="Clear Cache" Click="OnClearCacheClick" HorizontalAlignment="Left"/>
+                <TextBlock Text="Deletes the file scan cache — the next scan of any folder will take longer while it rebuilds."
+                           TextWrapping="Wrap" Opacity="0.7" FontSize="12"/>
+            </StackPanel>
+
+            <StackPanel Spacing="4" Margin="0,12,0,0">
+                <Button Content="Clear Move History" Click="OnClearMoveHistoryClick" HorizontalAlignment="Left"/>
+                <TextBlock Text="Deletes every Organization move log. This is one-way — past moves can no longer be undone through the app."
+                           TextWrapping="Wrap" Opacity="0.7" FontSize="12"/>
+            </StackPanel>
+        </StackPanel>
+
+        <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}"
+                   TextWrapping="Wrap"
+                   Opacity="0.85"/>
+
+    </StackPanel>
+</Page>

@@ -37,6 +37,7 @@
                         Margin="8"
                         Padding="8"
                         CornerRadius="4"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                         BorderThickness="{x:Bind KeepBorderThickness, Mode=OneWay}"
                         BorderBrush="{ThemeResource AccentTextFillColorPrimaryBrush}">
                     <StackPanel Spacing="8">
@@ -54,7 +55,7 @@
                                 <TextBlock Text="★ Keep"
                                            FontSize="12"
                                            FontWeight="SemiBold"
-                                           Foreground="White"/>
+                                           Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"/>
                             </Border>
                         </Grid>
 

@@ -38,15 +38,24 @@ public sealed partial class MainWindow : Window
 
     private void OnNavSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
-        if (args.SelectedItem is not NavigationViewItem item) return;
+        Type pageType;
 
-        var pageType = item.Tag switch
+        if (args.IsSettingsSelected)
         {
-            "Duplicates"   => typeof(DuplicatesPage),
-            "Quality"      => typeof(QualityPage),
-            "Organization" => typeof(OrganizationPage),
-            _              => typeof(DuplicatesPage),
-        };
+            pageType = typeof(SettingsPage);
+        }
+        else
+        {
+            if (args.SelectedItem is not NavigationViewItem item) return;
+
+            pageType = item.Tag switch
+            {
+                "Duplicates"   => typeof(DuplicatesPage),
+                "Quality"      => typeof(QualityPage),
+                "Organization" => typeof(OrganizationPage),
+                _              => typeof(DuplicatesPage),
+            };
+        }
 
         if (ContentFrame.CurrentSourcePageType != pageType)
             ContentFrame.Navigate(pageType);
