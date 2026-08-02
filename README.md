@@ -119,6 +119,25 @@ Only come back here if installing fails with a message mentioning
 4. When it's done, close that window. **ImageCleanup** now appears in
    your Start Menu like any other app.
 
+**If double-clicking the script gives an error about scripts being
+"disabled on this system" or "not digitally signed"** — some computers
+block running scripts by default. This is normal, not a sign of a
+problem, and easy to work around for just this one script:
+
+1. In the folder you were given, click once in the empty area of the
+   File Explorer address bar (at the top of the window).
+2. Type `powershell` and press **Enter**. A PowerShell window opens,
+   already in the right folder.
+3. Type (or copy/paste) this exact line and press **Enter**:
+   ```
+   powershell -ExecutionPolicy Bypass -File .\Add-AppDevPackage.ps1
+   ```
+4. Follow the prompts the same as before.
+
+This only affects this one script, this one time — it does **not**
+change any permanent setting on your computer, and your computer will
+be back to blocking scripts by default the next time, same as before.
+
 **Seeing a security warning?** That's expected for an app installed
 this way (not from the Microsoft Store) — it doesn't mean anything is
 wrong, as long as the folder came from someone you trust.

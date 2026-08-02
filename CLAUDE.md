@@ -469,6 +469,25 @@ or "sideloading" or "developer mode."
    appears in your Start Menu like any other app — search for it or
    pin it, same as anything else you've installed.
 
+**If double-clicking/"Run with PowerShell" gives an error about
+scripts being "disabled on this system" or "not digitally signed"**
+— some computers block running scripts by default (PowerShell's
+execution policy). This is normal, not a sign of a problem, and easy
+to work around for just this one script:
+
+1. In the folder you were given, click once in the empty area of the
+   File Explorer address bar (at the top of the window).
+2. Type `powershell` and press **Enter** — a PowerShell window opens,
+   already in the right folder.
+3. Type (or copy/paste) this exact line and press **Enter**:
+   `powershell -ExecutionPolicy Bypass -File .\Add-AppDevPackage.ps1`
+4. Follow the same prompts as before.
+
+This only affects this one script run — it does **not** change any
+permanent setting on the machine; the next script run (or the next
+`.ps1` file from anywhere else) is blocked by the default policy again,
+same as before this workaround.
+
 **If something goes wrong**: the PowerShell window's messages usually
 say exactly what's missing (e.g. "certificate not trusted" means go back
 to Part 1; "sideloading not allowed" means go back to Part 2). If it
