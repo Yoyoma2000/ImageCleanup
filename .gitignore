@@ -76,3 +76,8 @@ BundleArtifacts/
 Package.StoreAssociation.xml
 _pkginfo.txt
 *.publishsettings
+
+# MSIX signing certificates — private keys must never be committed.
+# The public .cer (safe to share/commit if ever needed for distribution)
+# is intentionally not excluded here; only the private-key-bearing .pfx is.
+*.pfx

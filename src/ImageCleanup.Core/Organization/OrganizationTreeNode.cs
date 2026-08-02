@@ -35,8 +35,14 @@ public sealed class OrganizationTreeNode
     public bool WasRenamed => Kind == OrganizationNodeKind.File
         && !string.Equals(OriginalFileName, TargetFileName, StringComparison.Ordinal);
 
-    /// <summary>"2024 (312 files)" for group nodes; just the original filename for File nodes.</summary>
-    public string DisplayText => Kind == OrganizationNodeKind.File
-        ? OriginalFileName ?? Label
-        : $"{Label} ({FileCount} file{(FileCount == 1 ? "" : "s")})";
+    /// <summary>
+    /// "2024 (312 files)" for group nodes; just the original filename for
+    /// File nodes. Computed by OrganizationTreeBuilder (not this class) so a
+    /// caller can supply a localized group-label formatter — see
+    /// OrganizationTreeBuilder.BuildTree's formatGroupDisplayText parameter
+    /// and the App layer's OrganizationViewModel for that wiring. Settable
+    /// (not a computed property) for the same reason CategoryGroup.Label is:
+    /// the default English wording lives in the builder, not baked in here.
+    /// </summary>
+    public string DisplayText { get; init; } = string.Empty;
 }

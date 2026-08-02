@@ -9,31 +9,61 @@ namespace ImageCleanup.Core.Organization;
 /// </summary>
 public static class OrganizationTreeBuilder
 {
-    public static IReadOnlyList<OrganizationTreeNode> BuildTree(OrganizationPlan plan) =>
-        plan.Years.Select(BuildYearNode).ToList();
-
-    private static OrganizationTreeNode BuildYearNode(YearGroup year) => new()
+    /// <summary>
+    /// Flattens the plan. <paramref name="monthName"/> resolves a 1-12
+    /// month number to its display name for Month nodes' Label — omit it
+    /// (or pass null) for the original behavior, the current culture's
+    /// month name via CultureInfo, which is what every existing
+    /// caller/test still gets automatically. <paramref
+    /// name="formatGroupDisplayText"/> resolves a group node's (label,
+    /// fileCount) to its full DisplayText (e.g. "2024 (312 files)") —
+    /// omit it for the original English "{label} ({count} file(s))"
+    /// wording. A caller can supply localized versions of both (e.g. from
+    /// LocalizationService) instead; see the App layer's
+    /// OrganizationViewModel for that wiring — same pattern
+    /// OrganizationPlanner.BuildHierarchy's categoryFolderName parameter
+    /// already uses for the Photo/NoMetadata folder names.
+    /// </summary>
+    public static IReadOnlyList<OrganizationTreeNode> BuildTree(
+        OrganizationPlan plan,
+        Func<int, string>? monthName = null,
+        Func<string, int, string>? formatGroupDisplayText = null)
     {
-        Kind      = OrganizationNodeKind.Year,
-        Label     = year.Label,
-        FileCount = year.FileCount,
-        Children  = year.Months.Select(BuildMonthNode).ToList(),
+        var resolveMonthName = monthName ?? (month => new DateTime(1, month, 1).ToString("MMMM", CultureInfo.CurrentCulture));
+        var formatGroup = formatGroupDisplayText ?? ((label, fileCount) => $"{label} ({fileCount} file{(fileCount == 1 ? "" : "s")})");
+
+        return plan.Years.Select(year => BuildYearNode(year, resolveMonthName, formatGroup)).ToList();
+    }
+
+    private static OrganizationTreeNode BuildYearNode(YearGroup year, Func<int, string> monthName, Func<string, int, string> formatGroup) => new()
+    {
+        Kind        = OrganizationNodeKind.Year,
+        Label       = year.Label,
+        FileCount   = year.FileCount,
+        DisplayText = formatGroup(year.Label, year.FileCount),
+        Children    = year.Months.Select(m => BuildMonthNode(m, monthName, formatGroup)).ToList(),
     };
 
-    private static OrganizationTreeNode BuildMonthNode(MonthGroup month) => new()
+    private static OrganizationTreeNode BuildMonthNode(MonthGroup month, Func<int, string> monthName, Func<string, int, string> formatGroup)
     {
-        Kind      = OrganizationNodeKind.Month,
-        Label     = new DateTime(1, month.Month, 1).ToString("MMMM", CultureInfo.CurrentCulture),
-        FileCount = month.FileCount,
-        Children  = month.Categories.Select(BuildCategoryNode).ToList(),
-    };
+        var label = monthName(month.Month);
+        return new OrganizationTreeNode
+        {
+            Kind        = OrganizationNodeKind.Month,
+            Label       = label,
+            FileCount   = month.FileCount,
+            DisplayText = formatGroup(label, month.FileCount),
+            Children    = month.Categories.Select(c => BuildCategoryNode(c, formatGroup)).ToList(),
+        };
+    }
 
-    private static OrganizationTreeNode BuildCategoryNode(CategoryGroup category) => new()
+    private static OrganizationTreeNode BuildCategoryNode(CategoryGroup category, Func<string, int, string> formatGroup) => new()
     {
-        Kind      = OrganizationNodeKind.Category,
-        Label     = category.Label,
-        FileCount = category.FileCount,
-        Children  = category.Files.Select(BuildFileNode).ToList(),
+        Kind        = OrganizationNodeKind.Category,
+        Label       = category.Label,
+        FileCount   = category.FileCount,
+        DisplayText = formatGroup(category.Label, category.FileCount),
+        Children    = category.Files.Select(BuildFileNode).ToList(),
     };
 
     private static OrganizationTreeNode BuildFileNode(PlannedFile file)
@@ -44,6 +74,7 @@ public static class OrganizationTreeBuilder
             Kind             = OrganizationNodeKind.File,
             Label            = originalFileName,
             FileCount        = 1,
+            DisplayText      = originalFileName,
             SourcePath       = file.SourcePath,
             OriginalFileName = originalFileName,
             TargetFileName   = file.TargetFileName,

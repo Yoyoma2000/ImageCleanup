@@ -114,8 +114,9 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
             {
                 var plan = OrganizationPlanner.BuildHierarchy(
                     recordsSnapshot.Select(r => r.ToImageRecord()),
-                    ResolveCategoryFolderName);
-                return (plan, OrganizationTreeBuilder.BuildTree(plan));
+                    ResolveCategoryFolderName,
+                    ResolveMonthName);
+                return (plan, OrganizationTreeBuilder.BuildTree(plan, ResolveMonthName, FormatGroupDisplayText));
             });
 
             _currentPlan      = plan;
@@ -294,6 +295,35 @@ public sealed class OrganizationViewModel : INotifyPropertyChanged
         MetadataCategory.NoMetadata => LocalizationService.Current.GetString("Organization.FolderName.NoMetadata"),
         _                           => category.ToString(),
     };
+
+    /// <summary>
+    /// Resolves a 1-12 month number to its localized name — reads
+    /// Common.Month.1 through Common.Month.12 through LocalizationService,
+    /// same fallback-to-Dev behavior as every other localized string. Used
+    /// for BOTH the TreeView preview's Month node label and (via
+    /// OrganizationPlanner.BuildHierarchy) the real on-disk month folder
+    /// name — this is a real, functional consequence for Organization
+    /// moves under a non-Dev language, not just display text, the same way
+    /// ResolveCategoryFolderName's Photo/NoMetadata names already are.
+    /// </summary>
+    private static string ResolveMonthName(int month) =>
+        LocalizationService.Current.GetString($"Common.Month.{month}");
+
+    /// <summary>
+    /// Formats a group node's (label, fileCount) into its full DisplayText
+    /// (e.g. "March (5 files)") — reads Organization.TreeNodeGroupLabel
+    /// (composing the group's already-resolved label with
+    /// Organization.TotalFiles' "{0} file(s)" wording), so this reads
+    /// correctly in whichever language is active rather than the fixed
+    /// English pluralization the un-parameterized default in
+    /// OrganizationTreeBuilder falls back to.
+    /// </summary>
+    private static string FormatGroupDisplayText(string label, int fileCount)
+    {
+        var loc = LocalizationService.Current;
+        var countText = loc.GetString("Organization.TotalFiles", fileCount);
+        return loc.GetString("Organization.TreeNodeGroupLabel", label, countText);
+    }
 
     private HashSet<string> GetSelectedSourcePaths() =>
         _selectionRoots

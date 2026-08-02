@@ -106,16 +106,751 @@ C#/.NET 9, WinUI 3 for UI.
 - Build: dotnet build
 - Test: dotnet test
 - Run: dotnet run --project src/ImageCleanup.App  (CLI-only for Core/Data;
-  App must be run via Visual Studio F5 — see Notes)
+  App must be run via Visual Studio F5 — see Notes. **Exception**: `dotnet
+  build src/ImageCleanup.App` now actually works from the CLI as of the
+  MSIX packaging pivot below — see Notes for the full explanation of why
+  this constraint, true for the entire rest of this project's history,
+  no longer holds.)
+
+## Publishing (MSIX packaging)
+**This supersedes the earlier self-contained/unpackaged approach —
+unpackaged deployment is confirmed unreliable for this app and should
+not be used.** The original unpackaged publish (see "Superseded" below
+for the full history) reliably crashed on launch outside the dev
+environment with `0xC000027B` in `Microsoft.UI.Xaml.dll` / `combase.dll`
+`E_FAIL` — a WinRT/COM activation failure specific to unpackaged apps'
+reg-free activation path. MSIX packaging sidesteps this entirely: a
+packaged app gets its WinRT classes registered for real at install time
+(the mechanism unpackaged apps have to fake via reg-free WinRT, which is
+what was failing), so this class of crash structurally can't happen for
+a packaged app the way it did here.
+
+**Goal**: an installable `.msix` (+ a small `Dependencies\` folder
+carrying the Windows App SDK runtime packages, + a signing certificate
+end users trust once) that installs and runs via Windows' normal app
+install mechanism — no more "copy a folder and hope reg-free WinRT
+works," no more Recycle-Bin-style unpackaged fragility.
+
+### What changed in the project
+This app never had a separate **Windows Application Packaging
+Project** — it's been unpackaged since day one. Rather than add a
+second project, it's now set up for **single-project MSIX** (a Windows
+App SDK feature specifically for this: one project, no separate
+packaging project, `Package.appxmanifest` lives directly in
+`ImageCleanup.App`). Changes made:
+- `ImageCleanup.App.csproj`: removed `<WindowsPackageType>None</
+  WindowsPackageType>` (that property is what opted the project OUT of
+  packaging in the first place) and added `<EnableMsixTooling>true</
+  EnableMsixTooling>` plus `<PublishProfile>Properties\PublishProfiles\
+  win10-$(Platform).pubxml</PublishProfile>` — the two properties
+  Microsoft's official single-project-MSIX conversion steps specify for
+  turning an existing non-packaged WinUI 3 project into a packaged one.
+  Also added a `Content` item for the new `Images\*.png` package assets
+  (below) — `CopyToOutputDirectory=PreserveNewest`, matching the existing
+  `Strings\*.json` item's pattern.
+- **`Package.appxmanifest`** (new file, project root) — the package
+  manifest single-project MSIX needs. `Identity Name="ImageCleanup"`,
+  `Publisher="CN=ImageCleanup"` (this exact string is what the signing
+  certificate's Subject must match — see Certificate below),
+  `DisplayName`/`PublisherDisplayName` both `"ImageCleanup"`,
+  `TargetDeviceFamily Name="Windows.Desktop"` matching the app's existing
+  `TargetPlatformMinVersion` (10.0.17763.0), and a single `runFullTrust`
+  capability (no `internetClient` or anything else — this app does
+  real file I/O across arbitrary user-selected folders but never talks
+  to the network, so `runFullTrust` alone covers what it actually needs).
+  `Executable="$targetnametoken$.exe"` / `EntryPoint="$targetentrypoint$"`
+  are the standard MSBuild-filled tokens every WinUI 3 packaged
+  template uses — confirmed these resolve correctly (to
+  `ImageCleanup.App.exe` / `Windows.FullTrustApplication`) in the
+  generated `AppxManifest.xml`, not hand-verified from documentation
+  alone.
+- **`Images\` folder** (new, project root) — the five package-asset
+  images `Package.appxmanifest` references: `Square44x44Logo.png` (44×44),
+  `Square150x150Logo.png` (150×150), `Wide310x150Logo.png` (310×150),
+  `StoreLogo.png` (50×50), `SplashScreen.png` (620×300). **These are
+  placeholder art** — a solid blue fill with a plain "IC" glyph,
+  generated programmatically, not real branding. The package builds and
+  installs correctly with these; swapping in real icons whenever that's
+  prioritized is a pure asset-replacement (same filenames/dimensions),
+  no manifest or project changes needed. Flagged under Known gaps below
+  so it isn't silently forgotten.
+- **`Properties\PublishProfiles\win10-x64.pubxml`, `win10-x86.pubxml`,
+  `win10-arm64.pubxml`** (new files) — one per architecture, each just
+  `Configuration=Release`, the matching `Platform`/`RuntimeIdentifier`,
+  and `SelfContained=false` (see "Framework-dependent, deliberately"
+  below). These are what `$(Platform)` resolves against in the
+  `<PublishProfile>` property above, and what Visual Studio's **Create
+  App Packages** wizard uses as its per-architecture presets.
+- **The old `FolderProfile.pubxml`** (from the unpackaged/self-contained
+  attempt) is untouched but no longer the recommended path — left in
+  place since deleting a file Alan might still want for comparison isn't
+  this session's call to make; see "Superseded" below.
+
+### F5 debugging needs its own local deploy — this bit Alan directly
+**Packaged (MSIX) apps activate through package identity — a raw
+`.exe` launch bypasses that entirely, and F5 defaulted to exactly that
+raw launch after the MSIX pivot, producing an immediate crash:
+`System.Runtime.InteropServices.COMException: Class not registered
+(0x80040154 (REGDB_E_CLASSNOTREG))`.** This is a real, hit-in-practice
+regression, not a hypothetical — it worked fine before the pivot (when
+the project launched as a plain unpackaged `.exe`, no package identity
+involved at all) and broke immediately after (Visual Studio kept
+launching the raw `.exe` the same old way, but the app's own code now
+expects to be activated *as* a package). Two separate things were
+missing, not one — both required, confirmed against Microsoft's
+official single-project-MSIX conversion steps rather than guessed at:
+- **Configuration Manager's Deploy checkbox wasn't enabled for
+  ImageCleanup.App.** In a `.sln` file this shows up as missing
+  `.Deploy.0` entries in `GlobalSection(ProjectConfigurationPlatforms)`
+  — confirmed directly by inspecting `ImageCleanup.sln`, which had
+  `ActiveCfg`/`Build.0` lines for every Debug/Release × Any CPU/x64/x86
+  combination but no `Deploy.0` lines at all. Without Deploy enabled,
+  a build never registers the package locally, so even a correctly
+  packaged build has no local package identity for anything to
+  activate against. **Fixed**: added a `Deploy.0` line (matching the
+  existing `Build.0` value) for every one of ImageCleanup.App's six
+  Debug/Release × Any CPU/x64/x86 configuration/platform combinations.
+  Core/Data/the two test projects were left untouched — Deploy only
+  makes sense for the one project that's actually an app package.
+- **No `Properties\launchSettings.json` existed.** Per Microsoft's own
+  single-project-MSIX conversion doc (the same one this whole pivot
+  followed originally), Visual Studio 2026+ (confirmed this is what
+  Alan's on — `ImageCleanup.sln` reports `VisualStudioVersion = 18.x`,
+  and VS's major version 18 *is* the 2026 release line) needs an
+  explicit `commandName: "MsixPackage"` launch profile for F5 to
+  actually launch the app *as* an activated package rather than
+  falling back to a direct executable launch. This file didn't exist at
+  all (the project never needed one before — an unpackaged app just
+  launches its `.exe` directly, no profile needed). **Fixed**: added
+  `src/ImageCleanup.App/Properties/launchSettings.json` with a single
+  `"ImageCleanup.App"` profile, `commandName: "MsixPackage"`, matching
+  the exact schema from Microsoft's conversion doc verbatim (not
+  invented from scratch) — `alwaysReinstallApp: false` so routine F5
+  runs stay fast (only re-registers when something actually changed),
+  everything else at the documented defaults.
+- **Both were needed together, not either alone** — Deploy without the
+  right launch profile would still try to launch the raw `.exe` (same
+  crash); the right launch profile without Deploy would try to activate
+  a package that was never actually registered locally (a different,
+  probably even more confusing failure). This is why the task asked to
+  "confirm what's actually needed... rather than guessing at a single
+  property" — there wasn't a single property here, there were two
+  independent gaps, from two different layers of the toolchain (`.sln`
+  IDE metadata vs. a per-project launch-profile file).
+- **Not expected to affect the already-working Release/Create-App-Packages
+  flow at all** — neither change is read by `dotnet build`/`dotnet
+  publish`/the packaging MSBuild targets; `.sln` Deploy flags are pure
+  Visual-Studio-IDE metadata (confirmed: re-ran `dotnet build -c Debug
+  -p:Platform=x64` after both fixes and it succeeds identically to
+  before), and `launchSettings.json` is only ever consulted for F5/
+  `dotnet run`-style launches, never for a build or a **Create App
+  Packages** publish. The Release packaging pipeline verified working
+  end-to-end in the previous session (build → sign → trust → install →
+  launch, with a throwaway certificate) is untouched by either of these
+  files.
+
+### Framework-dependent, deliberately
+The three new `.pubxml` profiles set `SelfContained=false` — this
+package depends on the `Microsoft.WindowsAppRuntime.1.6` framework
+package being present (confirmed in the generated `AppxManifest.xml`:
+`<PackageDependency Name="Microsoft.WindowsAppRuntime.1.6" MinVersion=
+"6000.519.329.0" .../>`) rather than bundling a private copy the way
+the old self-contained/unpackaged attempt did. This is a deliberate
+change of direction, not an oversight:
+- The entire reason `WindowsAppSDKSelfContained=true` was used before
+  was to avoid installing a separate runtime for an *unpackaged* app
+  — but self-contained bundling is also exactly what forced the app
+  onto the reg-free WinRT activation path that turned out to be the
+  crash's root cause. MSIX packaging doesn't need that workaround at
+  all: a real package install registers everything properly regardless
+  of whether the runtime is bundled or referenced.
+- Framework-dependent keeps the `.msix` itself small; the
+  `Microsoft.WindowsAppRuntime.1.6` framework package is a normal MSIX
+  dependency, installed automatically alongside the app the same way
+  any MSIX framework dependency is — Visual Studio's **Create App
+  Packages** output includes a `Dependencies\` folder with that
+  framework package for every architecture specifically so this
+  install can happen offline/sideloaded, not just from the Store.
+- If self-contained MSIX is ever wanted instead (e.g. to avoid the
+  dependency install step entirely), it's a one-line change
+  (`SelfContained=true` in the relevant `.pubxml`) — not attempted here
+  since framework-dependent is the standard, lower-friction default for
+  MSIX and there's no reason yet to deviate from it.
+
+### Certificate / code signing
+MSIX packages must be signed — even for pure sideloading, with no
+Microsoft Store involved. This isn't optional the way it effectively
+was for the old unpackaged .exe.
+- **What it is**: a normal code-signing certificate, self-signed
+  (not issued by a public CA) since this app isn't going through the
+  Store. Self-signed is completely standard for sideloaded/internal MSIX
+  distribution — this isn't a workaround or a lesser option, it's the
+  documented, supported approach for exactly this scenario.
+- **The certificate's Subject must exactly match `Package.appxmanifest`'s
+  `Publisher` value** (`CN=ImageCleanup`) — MSIX validates this at
+  install time and rejects a mismatch. As long as Alan generates the
+  certificate through Visual Studio's own wizard (below) rather than
+  hand-typing a Subject, this can't drift out of sync — the wizard reads
+  the manifest's `Publisher` value and pre-fills it.
+- **Recommended: generate it via Visual Studio's Publish wizard** (the
+  **Create App Packages** flow, not the old **Folder** flow) — it has a
+  built-in "create a test certificate" option that handles subject
+  matching, key generation, and `.pfx` export in one step. This is the
+  path documented in the step-by-step below; don't hand-roll a
+  certificate with `New-SelfSignedCertificate`/`makecert` unless the
+  wizard's option is unavailable for some reason.
+- **Where it's stored**: Visual Studio saves the generated `.pfx`
+  alongside the project (e.g.
+  `src\ImageCleanup.App\ImageCleanup.App_TemporaryKey.pfx`) and wires
+  `<PackageCertificateKeyFile>`/`<PackageCertificateThumbprint>` into
+  `ImageCleanup.App.csproj` automatically so every subsequent build/
+  publish signs with the *same* certificate — don't remove those
+  properties once they appear, and don't regenerate the certificate
+  casually: a new certificate means every machine that already trusted
+  the old one needs to trust the new one too. **`.pfx` files are now
+  git-ignored** (`.gitignore` gained a `*.pfx` rule this session,
+  specifically for this — a private key must never be committed).
+  **Back this file up somewhere durable once it exists** (it's the
+  only copy) — losing it means every future rebuild gets a different
+  certificate, breaking trust on every machine that installed a
+  previous build.
+- **End users must trust this certificate once, per machine, before
+  installing** — this is the one-time setup step covered in "Installing
+  ImageCleanup" below. It is *not* a per-app-update step; once a
+  machine trusts the certificate, every future `.msix` signed with the
+  same certificate installs without re-trusting.
+- **Verified working, this session**: to confirm the whole pipeline
+  (manifest → build → sign → trust → install → launch) actually works
+  end-to-end and isn't just theoretically correct from documentation,
+  a throwaway self-signed test certificate was generated directly
+  (`New-SelfSignedCertificate`, Subject `CN=ImageCleanup` matching the
+  manifest), used to sign a real `.msix` built via `dotnet build
+  -p:GenerateAppxPackageOnBuild=true`, trusted via `Import-Certificate`
+  into both `Cert:\CurrentUser\TrustedPeople` *and*
+  `Cert:\CurrentUser\Root`, and installed via `Add-AppxPackage`. **This
+  succeeded** — the exact class of crash this whole pivot exists to fix
+  did not reproduce. The throwaway certificate and its `.pfx`/`.cer`
+  were deleted afterward (from both the certificate store and disk) —
+  Alan's real certificate should come from Visual Studio's wizard, not
+  reuse this session's throwaway one.
+  - **One finding worth knowing about in advance**: importing into
+    `Cert:\CurrentUser\Root` (Trusted Root Certification Authorities)
+    specifically requires *interactive* confirmation — Windows blocks a
+    fully silent/scripted import into that store as a deliberate
+    anti-malware protection (confirmed directly: `Import-Certificate`
+    into `Cert:\CurrentUser\Root` failed with "UI is not allowed in this
+    operation"; only `Cert:\LocalMachine\Root`, which needs admin, can be
+    done silently). **This means the double-click-the-.cer-file method
+    in the end-user instructions below is the right approach, not
+    something to try to script away** — a real end user is expected to
+    see and click through that confirmation dialog once.
+
+### Step-by-step (Alan, in Visual Studio — same reason as always: Claude
+Code can configure the project but can't drive the Visual Studio UI)
+1. Open `ImageCleanup.sln` in Visual Studio.
+2. Confirm `Package.appxmanifest` shows up in Solution Explorer (it
+   should appear as a normal project item with a manifest icon —
+   double-clicking it opens Visual Studio's visual manifest designer).
+   Optionally review/adjust `DisplayName`/`Publisher Display Name`/
+   `Version` there — everything currently set is a reasonable default,
+   not a placeholder that must be changed before this works.
+3. Right-click the **ImageCleanup.App** project → **Publish...** →
+   choose **Create App Packages** this time (not **Folder** — that was
+   the old unpackaged flow).
+4. Choose **Sideloading** (not "Microsoft Store under a new app name" —
+   this app was never intended for Store distribution).
+5. On the signing step: choose **Yes, select a certificate** → **Create...**
+   to generate a new test certificate. Visual Studio pre-fills the
+   Subject from `Package.appxmanifest`'s `Publisher`
+   (`CN=ImageCleanup`) — accept that rather than typing a different
+   one. Set a password when prompted (remember it — needed again only
+   if re-signing manually later, not for normal rebuilds).
+6. Select architecture(s) — **x64** alone is enough unless Alan
+   specifically needs x86/arm64 machines covered too.
+7. **Generate an app bundle**: choose **Never** — single-project MSIX
+   only supports producing a single `.msix` per architecture anyway (not
+   an `.msixbundle`), so bundling isn't applicable here.
+8. Click **Create**. This builds, packages, and signs — output location
+   is shown at the end (see "Output & distribution" below for exactly
+   what's in it).
+9. **First build only**: if this is the very first time the certificate
+   was generated, Visual Studio may also prompt to install it locally
+   so *this* machine (the dev machine) can test-install the package too
+   — accept that prompt for local testing; it's separate from what end
+   users need to do (below).
+
+### Output & distribution
+The **Create App Packages** wizard's output folder (path shown at the
+end of the wizard, typically under
+`src\ImageCleanup.App\AppPackages\ImageCleanup.App_1.0.0.0_Test\` or
+similar) contains everything needed to distribute — **give end users
+this whole folder, not just the `.msix` file**:
+- `ImageCleanup.App_1.0.0.0_x64.msix` — the actual app package.
+- `ImageCleanup.App_1.0.0.0_x64.cer` (or similarly named) — the public
+  half of the signing certificate. **This is what end users trust before
+  installing** — safe to share freely (it contains no private key).
+- `Dependencies\<architecture>\Microsoft.WindowsAppRuntime.1.6.msix` —
+  the Windows App SDK runtime framework package, one per architecture.
+  Needed on any machine that doesn't already have it installed (most
+  won't, unless they've installed other Windows App SDK apps before).
+- `Install.ps1` — a straightforward PowerShell installer script.
+- `Add-AppDevPackage.ps1` (+ `Add-AppDevPackage.resources\`) — an
+  older, more defensive install script (checks for a developer license/
+  sideloading, prompts to install the certificate, then installs the
+  package + dependencies) — this is the one referenced in the end-user
+  instructions below, since it's the most forgiving of a machine that
+  hasn't sideloaded anything before.
+- Confirmed directly this session (via the manual build+sign+install
+  described above, not just from documentation): a `dotnet build
+  -p:Platform=x64 -c Release -p:GenerateAppxPackageOnBuild=true` from
+  the CLI also produces an equivalent (unsigned) `.msix` — **this is
+  the surprising finding that overturns this project's long-standing
+  "App can't be built via CLI" constraint** (see Notes). This isn't a
+  recommended replacement for the VS wizard (no certificate, no
+  `Dependencies\`/`Install.ps1` convenience folder, single-architecture
+  only) — it's noted here because it's genuinely new information worth
+  having on record, and because it's how this session verified the
+  packaging config compiles correctly without needing Alan's VS session
+  to do it first.
+
+### Installing ImageCleanup (for a non-technical end user)
+**Read this section as if explaining it to someone who has never used a
+terminal or installed unsigned software before — no assumed knowledge.**
+You'll receive a folder (probably a `.zip` someone sent you, or a folder
+you copied from a USB drive) — unzip it first if needed, so you have a
+plain folder you can open in File Explorer.
+
+**Part 1 — trust the certificate (only needed the first time)**
+
+1. Open the folder you were given. Find the file that ends in `.cer`
+   (for example `ImageCleanup.App_1.0.0.0_x64.cer`).
+2. Double-click it. A window titled **Certificate** opens.
+3. Click the **Install Certificate...** button.
+4. A wizard opens. Choose **Local Machine** (not "Current User"), then
+   click **Next**. (If Windows asks "Do you want to allow this app to
+   make changes to your device?", click **Yes** — installing a
+   certificate always asks this, it's normal.)
+5. Choose **Place all certificates in the following store**, click
+   **Browse...**, select **Trusted Root Certification Authorities**,
+   click **OK**, then **Next**, then **Finish**.
+6. You'll see a **Security Warning** popup asking to confirm you want
+   to install this certificate — this is Windows double-checking, since
+   installing a "root" certificate is normally something only IT
+   departments do. Since you got this file directly from someone you
+   trust (not a random download), click **Yes**.
+7. A popup says "The import was successful." Click **OK**.
+
+**Part 2 — allow apps from outside the Microsoft Store (only needed if
+this is the first non-Store app you've installed)**
+
+Windows may already allow this — try Part 3 first, and only come back
+here if installing fails with a message about "this app can't install"
+or "sideloading" or "developer mode."
+
+1. Click the **Start** button, type **Settings**, and open it.
+2. Depending on your Windows version, you'll either see a page called
+   **For developers** directly, or you'll need to go to **System** →
+   **Advanced** first, then look for a **For developers** section.
+3. Turn on **Developer Mode**.
+4. A warning appears explaining this unlocks some extra features — click
+   **Yes** to confirm.
+
+**Part 3 — install the app**
+
+1. Go back to the folder you were given.
+2. Right-click the file named **Add-AppDevPackage.ps1** and choose
+   **Run with PowerShell**.
+3. A blue PowerShell window opens and walks you through installation
+   automatically — it checks everything it needs (including the
+   certificate from Part 1) and installs the app plus anything else it
+   needs along the way. Just follow any prompts it shows (press Enter or
+   type **Y** if asked to confirm something).
+4. When it finishes, close the PowerShell window. **ImageCleanup** now
+   appears in your Start Menu like any other app — search for it or
+   pin it, same as anything else you've installed.
+
+**If something goes wrong**: the PowerShell window's messages usually
+say exactly what's missing (e.g. "certificate not trusted" means go back
+to Part 1; "sideloading not allowed" means go back to Part 2). If it
+still doesn't work, take a screenshot of the error and send it back for
+help — don't try to guess-fix a certificate/security error yourself.
+
+**Updates later**: once installed, getting a newer version is the same
+Part 3 process with the new `.msix` — Part 1 and 2 don't need repeating
+unless the certificate itself changes (it won't, unless Alan
+regenerates it).
+
+## Publishing — superseded: self-contained, unpackaged .exe
+**Do not use this approach — kept for history and because the crash
+investigation below is the reason MSIX packaging (above) exists.** If
+anything in this section conflicts with the MSIX section above, the
+MSIX section is current.
+
+
+**Goal**: a folder containing `ImageCleanup.App.exe` + all dependency DLLs
++ the bundled Windows App SDK runtime, that runs on a machine with no
+Visual Studio, no .NET SDK, and no separately-installed Windows App
+Runtime. This is distribution prep only — no installer yet, just a
+copyable folder (see "No installer or distribution path" under Known
+gaps for what comes after).
+
+- **CLI `dotnet publish` was tried first and hits the exact same wall as
+  `dotnet build`** — confirmed directly:
+  `dotnet publish -r win-x64 -p:WindowsPackageType=None -p:SelfContained=true
+  -p:WindowsAppSDKSelfContained=true` from `src/ImageCleanup.App` fails with
+  the identical `MSB4062` (`Microsoft.Build.Packaging.Pri.Tasks.
+  ExpandPriContent` task can't load, missing `Microsoft.Build.Packaging.Pri.
+  Tasks.dll`) as `dotnet build` always has — this DLL only ships with
+  Visual Studio's MSBuild toolset, not the plain SDK, regardless of
+  build vs. publish. **Must use Visual Studio's Publish feature** — see
+  the step-by-step below.
+- **MSBuild properties needed** (set via the Publish profile UI, not
+  hand-edited into the .csproj — see steps below for why):
+  `WindowsPackageType=None` (already the project default — unpackaged,
+  no MSIX), `SelfContained=true` + `WindowsAppSDKSelfContained=true`
+  (bundles the .NET runtime AND the Windows App SDK runtime into the
+  output folder, so the target machine needs neither installed),
+  `RuntimeIdentifier=win-x64` (see architecture note below),
+  `PublishReadyToRun=true` (worth enabling — precompiles IL to native
+  code for faster startup; the tradeoff is a larger output folder and a
+  slightly longer publish, both acceptable for a one-time manual publish
+  step like this).
+- **Architecture: the project now consistently targets x64** — fixed
+  after the "Any CPU silently resolves to x86" footgun (flagged when
+  publish config was first researched) actually surfaced as a hard
+  error: `ImageCleanup.sln`'s solution-to-project platform mapping used
+  to send **both** `Debug|Any CPU` and `Release|Any CPU` to `x86` for
+  the App project specifically, so when a Publish profile set
+  `RuntimeIdentifier=win-x64` while the active solution configuration
+  ("Any CPU", VS's default) still resolved the App project's actual
+  `Platform`/`PlatformTarget` to `x86`, MSBuild correctly refused with
+  `"The RuntimeIdentifier platform 'win-x64' and the PlatformTarget
+  'x86' must be compatible."` — publish logs confirmed `Configuration:
+  Release x86` even though the profile said win-x64. **Fixed at the
+  root, not worked around in the wizard**: `ImageCleanup.sln`'s
+  `ProjectConfigurationPlatforms` section now maps the App project's
+  `Debug|Any CPU` and `Release|Any CPU` to `Debug|x64`/`Release|x64`
+  instead of `x86` — so "Any CPU" (what F5 and a fresh Publish both use
+  by default) now consistently means x64 for this project, matching the
+  win-x64 publish target with nothing left to silently disagree. The
+  explicit `x86`/`x64` solution configurations remain available
+  unchanged (still selectable directly from VS's Solution Configuration
+  dropdown) if x86 is ever needed for something specific — only the
+  *default* changed. Core/Data/their test projects have no
+  `Platforms`/`RuntimeIdentifiers` restriction at all (pure logic
+  libraries, no RID dependency) and were confirmed unaffected — their
+  `Any CPU` mapping was already `Any CPU` before and after this change,
+  and `dotnet build`/`dotnet test` were re-run to confirm (212 tests
+  still pass, 124 Core + 88 Data).
+  - **F5 debugging still works exactly as before, functionally** — this
+    was the main thing to protect, since F5 is how this app has
+    actually been run/tested this entire project. The one real
+    difference: F5 under the default "Any CPU" solution config now
+    launches an x64 build instead of x86 (previously silently x86, per
+    the footgun above) — nothing in the app's own code is
+    architecture-specific (no P/Invoke, no native-pointer-size
+    assumptions), so this is not expected to change observable
+    behavior, only which architecture's DLLs get loaded. Needs Alan's
+    confirmation via an actual F5 run, same as every other WinUI-layer
+    change in this file — flagged in the manual verification checklist
+    below rather than assumed risk-free.
+  - Also fixed in the same pass: the actual `FolderProfile.pubxml`
+    Alan generated while working through the Publish wizard was
+    missing `WindowsAppSDKSelfContained` (the wizard didn't expose it
+    as a checkbox, exactly the gap flagged when this was first
+    researched) — added `<WindowsAppSDKSelfContained>true</
+    WindowsAppSDKSelfContained>` and `<WindowsPackageType>None</
+    WindowsPackageType>` directly to
+    `src/ImageCleanup.App/Properties/PublishProfiles/
+    FolderProfile.pubxml` so the profile actually produces the
+    Windows-App-Runtime-independent output this whole effort is for,
+    not just a .NET-self-contained-but-still-needs-WinAppRuntime build.
+- **Publish profile file**: `src/ImageCleanup.App/Properties/
+  PublishProfiles/FolderProfile.pubxml` now exists (created by Alan
+  running the Publish wizard once) and is checked into git — the
+  `.pubxml.user` sitting alongside it (machine-specific publish
+  history/state) is not, matching the repo's existing blanket `*.user`
+  gitignore rule. Re-publishing going forward is a single button click
+  against this saved profile — no need to re-answer the wizard, and no
+  need to manually switch platform in the wizard anymore now that Any
+  CPU resolves to x64 by default.
+
+### Step-by-step (Alan, in Visual Studio — Claude Code cannot drive this)
+**A saved profile already exists** (`src/ImageCleanup.App/Properties/
+PublishProfiles/FolderProfile.pubxml`, checked in) with `RuntimeIdentifier=
+win-x64`, `SelfContained=true`, `WindowsAppSDKSelfContained=true`, and
+`WindowsPackageType=None` already set correctly — so steps 1-5 below only
+need to be redone if that profile is ever deleted or a second profile is
+wanted; otherwise skip straight to opening it in Publish and clicking
+**Publish**.
+1. Open `ImageCleanup.sln` in Visual Studio.
+2. In Solution Explorer, right-click the **ImageCleanup.App** project ->
+   **Publish...**.
+3. Choose **Folder** as the publish target (not ClickOnce, not Azure,
+   not a Windows package/MSIX — a plain folder is exactly the
+   "copyable folder" output this task asked for).
+4. Pick a folder location for the profile (any local path — this is
+   just where the wizard writes the profile file, not the publish
+   output itself).
+5. Once the profile is created, click the profile's **Edit** (pencil)
+   / **Show all settings** to open the full settings dialog and set:
+   - **Configuration**: Release
+   - **Target Runtime**: `win-x64` (not "Portable" — Portable produces a
+     framework-dependent build that still requires the .NET/Windows App
+     Runtime installed on the target machine, which defeats the goal
+     here)
+   - **Deployment mode**: **Self-contained**
+   - **Target location**: wherever the output folder should land (e.g.
+     `bin\Release\net9.0-windows10.0.19041.0\win-x64\publish\` is the
+     default if left unchanged — see "Output location" below)
+   - Under **File publish options** (or by editing the generated
+     `.pubxml` directly after this first pass, whichever is easier in
+     the VS version installed): confirm/add
+     `<WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>` and
+     `<WindowsPackageType>None</WindowsPackageType>` — the wizard may not
+     expose `WindowsAppSDKSelfContained` as a checkbox in every VS
+     version; if it's missing from the UI, open the generated `.pubxml`
+     in a text editor and add the line manually inside the existing
+     `<PropertyGroup>`, then re-run Publish (editing the `.pubxml` this
+     way is normal/expected — it's just MSBuild XML, not a special file).
+   - Optionally enable **ReadyToRun compilation** (`PublishReadyToRun=
+     true`) in the same settings dialog, for faster startup — worth
+     turning on for a distributed build.
+6. Click **Publish** (or **Save** then **Publish** if it only saved the
+   profile). This is a real build+publish and may take a few minutes,
+   especially with ReadyToRun enabled the first time.
+7. **If it fails with `"The RuntimeIdentifier platform 'win-x64' and the
+   PlatformTarget 'x86' must be compatible"`**: this was a real bug hit
+   during the first publish attempt from this repo, now fixed at the
+   `.sln` level (see the Architecture bullet above) — `ImageCleanup.sln`'s
+   `Any CPU` mapping for the App project now resolves to x64, not x86, so
+   this shouldn't recur. If it does resurface, check the active
+   **Solution Configuration** dropdown in the VS toolbar isn't explicitly
+   pinned to an `x86` solution platform (as opposed to `Any CPU` or
+   `x64`) — publish uses whatever solution configuration/platform is
+   currently active, not just the profile's own settings.
+8. If it instead fails with the plain MSB4062 seen in CLI attempts (no
+   platform-mismatch wording, just the PRI packaging task failing to
+   load): this would mean even Visual Studio's own MSBuild toolset is
+   somehow missing the PRI packaging component (unlikely if F5 already
+   works, since F5 needs the same component) — in that case, run the
+   Visual Studio Installer and confirm the "Windows App SDK C# Templates"
+   / "Universal Windows Platform development" workload is installed,
+   which is what provides `Microsoft.Build.Packaging.Pri.Tasks.dll`.
+9. Confirm the output: open the target/output folder from step 5 and
+   check for `ImageCleanup.App.exe`, a large set of `.dll` files
+   (including `Microsoft.WindowsAppSDK.*`, `Microsoft.WindowsAppRuntime.*`
+   runtime DLLs — proof `WindowsAppSDKSelfContained` actually took
+   effect, not just the .NET runtime), the `Strings\` folder (dev/en/
+   zh.json — already `CopyToOutputDirectory` content, should carry
+   through publish unchanged), and no separate installer/MSIX file (this
+   step deliberately doesn't produce one).
+
+### Output location
+Default (unless a custom Target location was set in step 5):
+`src\ImageCleanup.App\bin\Release\net9.0-windows10.0.19041.0\win-x64\
+publish\` — this whole folder is what gets copied to another machine to
+test standalone. It should contain:
+- `ImageCleanup.App.exe` — the entry point
+- `ImageCleanup.App.dll`, `ImageCleanup.Core.dll`, `ImageCleanup.Data.dll`
+  — this app's own assemblies
+- Every third-party dependency DLL (CommunityToolkit.Mvvm,
+  Microsoft.Data.Sqlite + its native `e_sqlite3.dll`, SixLabors.ImageSharp,
+  MetadataExtractor, Microsoft.Extensions.DependencyInjection, etc.)
+- The bundled Windows App SDK runtime DLLs (`Microsoft.WindowsAppRuntime.
+  Bootstrap.dll` and friends) — this is the piece that makes the target
+  machine not need Windows App Runtime pre-installed
+- The .NET 9 runtime DLLs (self-contained — no separate .NET install
+  needed on the target machine either)
+- `Strings\dev.json` / `en.json` / `zh.json`
+- `ImageCleanup.App.deps.json` / `.runtimeconfig.json` (standard
+  self-contained-publish manifest files)
+
+**Not yet done** (explicitly out of scope for this step, per the task):
+no installer, no code signing — see the crash writeup immediately below
+for the verification that *has* happened since, and what it found.
+
+### Known crash: 0xC000027B in Microsoft.UI.Xaml.dll / combase.dll E_FAIL on the self-contained publish
+**Status: mitigation applied (WindowsAppSDK patch-version bump), not yet
+confirmed fixed — Alan needs to re-publish and re-test; see "What to do
+next" at the end of this section.**
+
+The first real publish output Alan produced (via the profile above) and
+ran crashed immediately on launch. Windows Event Viewer showed two
+correlated reports for every crash:
+- **Application Error** (`Faulting module name: Microsoft.UI.Xaml.dll`,
+  **Exception code: 0xC000027B**) — this is `STATUS_STOWED_EXCEPTION`
+  ("an application-internal exception has occurred"), a generic WinRT
+  wrapper around some other failure, not a diagnosis on its own.
+- **Windows Error Reporting (WER)** for the same crash, naming
+  `combase.dll` as `P4` with `P7: 80004005` (`E_FAIL`) — this is the
+  actual failure: a COM/WinRT activation call inside `combase.dll`
+  returned `E_FAIL` while the app was starting up, and that failure
+  got stowed/rethrown as the `0xC000027B` seen in Event Viewer.
+
+**This crash was reproduced directly** (not just inferred from Event
+Viewer text) — the exact same folder Alan published to
+`C:\Users\alanq\Downloads\ImageCleanupApp` was run directly, and the
+process reliably exits with code `0xC000027B` every time, with Event
+Viewer showing the identical `Microsoft.UI.Xaml.dll` / `combase.dll
+E_FAIL 80004005` pair Alan reported. This let the actual investigation
+happen empirically (running things and observing results) rather than
+purely from documentation — see the findings below.
+
+**The initial hypothesis (missing reg-free WinRT activation manifest)
+was investigated and ruled out, not confirmed** — this matters, because
+it means the fix isn't "add a manifest that was missing":
+- The exe's manifest (WinUI/`WindowsAppSDKUndockedRegFreeWinRTInitialize`
+  auto-generates this — nothing hand-written) was extracted and
+  inspected directly. It's fully present and well-formed: 16
+  `<asmv3:file>` entries (`Microsoft.UI.Xaml.dll`,
+  `Microsoft.WindowsAppRuntime.dll`, `Microsoft.UI.Xaml.Controls.dll`,
+  etc.), with **503** `<winrtv1:activatableClass>` entries under
+  `Microsoft.UI.Xaml.dll` alone. Every one of those 16 files was
+  confirmed physically present in the publish folder — no dangling
+  reference to a missing DLL.
+- The C# **auto-initializer** the Windows App SDK injects for exactly
+  this scenario (a `[ModuleInitializer]`-attributed method in
+  `Microsoft.Windows.Foundation.UndockedRegFreeWinRTCS.AutoInitialize`,
+  added automatically to compilation via
+  `Microsoft.WindowsAppSDK.UndockedRegFreeWinRT.CS.targets` whenever
+  `WindowsAppSDKSelfContained=true` — exactly our config, no manual
+  wiring needed or missing) was confirmed **actually compiled into**
+  `ImageCleanup.App.dll` (its type/method names are present in the
+  compiled assembly). This runs automatically before `Main`, forcing
+  `Microsoft.WindowsAppRuntime.dll` to load, which is what's supposed to
+  activate reg-free WinRT support for the whole process.
+- So: the manifest is complete, all its referenced files exist, and the
+  code that's supposed to activate reg-free WinRT support is present
+  and wired up correctly. **Nothing was missing or misconfigured on the
+  app's side of this mechanism.**
+
+**What the investigation actually isolated**, via a direct A/B
+comparison on the same machine:
+- A **framework-dependent** build of the exact same code (not
+  self-contained, not unpackaged-in-the-way-that-matters-here — it
+  relies on the machine's already-installed/registered Windows App
+  Runtime MSIX packages) **launches successfully**.
+- The **self-contained, unpackaged publish** (same app code, same
+  WindowsAppSDK DLL version, just running via the local
+  reg-free-WinRT-activation path instead of real MSIX package
+  registration) **crashes every time**, reproducibly, at the same fault
+  offset.
+- Copying the published folder to a different location (`C:\Temp`
+  instead of `Downloads`) made no difference — ruling out a
+  Downloads-folder-specific restriction (Mark-of-the-Web, Controlled
+  Folder Access) as the cause.
+- This isolates the failure specifically to **reg-free WinRT activation
+  itself misbehaving at runtime** for this WindowsAppSDK version on this
+  machine's current Windows build — not the app's own XAML/code (proven
+  fine via the framework-dependent build), not a missing file, not a
+  location/permissions issue.
+- **Could not get a native call stack for the exact failing WinRT
+  activation call** — this machine has no WinDbg/`cdb.exe` installed,
+  and setting up Windows Error Reporting's `LocalDumps` registry key (to
+  capture a persisted full crash dump for offline analysis) requires
+  admin rights not available in this environment. If this ever needs
+  deeper investigation, that registry key
+  (`HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\
+  ImageCleanup.App.exe`, `DumpType=2` for a full dump) is the next
+  concrete step, run by someone with admin access.
+
+**Fix applied**: `ImageCleanup.App.csproj`'s `Microsoft.WindowsAppSDK`
+package reference bumped from `1.6.250115003` (resolving to
+`1.6.250205002` — over a year old at the time of this investigation) to
+`1.6.250602001`, the newest release still on the 1.6.x line. This is a
+same-major-version patch update — accumulated bug fixes only, no
+`RuntimeCompatibilityChange`-flagged behavior changes (those start
+appearing in the 1.7.x line) — chosen deliberately as the lower-risk
+first move for a project this mature (212 tests, extensive manually-
+verified feature history) rather than jumping straight to a 1.7.x major
+upgrade. No specific 1.6.x release-note entry between `.250205002` and
+`.250602001` names this exact crash — this is a "keep current, rule out
+an already-fixed-upstream bug" mitigation, not a confirmed root-cause
+fix. `dotnet build -p:Platform=x64` was re-run after the bump and
+reaches the same expected MSB4062 wall with no new/different compile
+errors, confirming the version bump doesn't break compilation; Core/Data
+are unaffected (they don't reference WindowsAppSDK) and their 212 tests
+still pass.
+
+**If this doesn't resolve it**: the one Microsoft-documented fix that
+actually matches this problem class — "Apps with an incorrect
+activation manifest no longer crash in certain situations but instead
+return an error" — shipped in **Windows App SDK 1.7.4**
+(`RuntimeCompatibilityChange`: `DesktopSiteBridge_ActivationErrorCrash`),
+not anywhere in the 1.6.x line. It's narrowly scoped to a component
+called "DesktopSiteBridge" in the release notes, so it's not a certain
+match for our crash either — but it's the closest documented precedent
+found. A full 1.7.x upgrade is the natural escalation if the 1.6.x patch
+bump doesn't fix it, but deserves its own dedicated pass (review every
+`RuntimeCompatibilityChange` entry between 1.6 and 1.7 for anything that
+could affect this app's existing behavior) rather than being bundled in
+here speculatively.
+
+**What to do next (Alan)**:
+1. Re-publish via the existing `FolderProfile.pubxml` (Visual Studio ->
+   right-click ImageCleanup.App -> Publish -> Publish) — this picks up
+   the `1.6.250602001` package bump automatically.
+2. Run the resulting `.exe` the same way as before (double-click from
+   outside the dev environment).
+3. **If it now launches successfully**: the patch bump fixed it — no
+   further action, but worth noting in a future session so this
+   write-up can be marked resolved rather than "mitigation applied."
+4. **If it crashes again with the identical signature** (Event Viewer:
+   `Microsoft.UI.Xaml.dll`, `0xC000027B`; WER: `combase.dll`,
+   `80004005`) — this specific fix wasn't sufficient. Next step is the
+   1.7.x escalation above, or capturing a real native crash dump (the
+   `LocalDumps` registry key noted above, run by someone with admin
+   rights on the target machine) to actually see the failing call
+   stack instead of continuing to reason from external evidence.
+5. **If it crashes with a *different* faulting module or exception
+   code**: that means this specific issue is resolved and something
+   *new* is now blocking startup — treat it as a fresh crash to
+   diagnose (check Event Viewer the same way: Application Error for the
+   faulting module/exception code, WER for the underlying HRESULT),
+   not a continuation of this one.
 
 ## Notes
-- App cannot be built via `dotnet build` CLI (MSB4062 — missing PRI/MRT DLL from plain SDK).
-  Build the App project via Visual Studio; Core/Data/tests build fine from CLI.
-  (A `dotnet build src/ImageCleanup.App` from Claude Code still reliably
-  reaches this exact wall on every unrelated change — genuinely new/
-  different XAML compiler errors appearing *before* that wall are real
-  and worth investigating, as opposed to this expected one; see the
-  `PaneBackground` entry below for a concrete example of exactly that.)
+- **The "App cannot be built via CLI" constraint no longer fully holds,
+  as of the MSIX packaging pivot** — this was true for this project's
+  entire history up to that point, so it's worth stating precisely what
+  changed and what didn't:
+  - Under the *old* unpackaged config (`WindowsPackageType=None`),
+    `dotnet build`/`dotnet publish` reliably hit `MSB4062` (missing
+    `Microsoft.Build.Packaging.Pri.Tasks.dll` — a VS-toolset-only PRI
+    packaging component for the *unpackaged* code path specifically).
+    This was confirmed repeatedly across multiple sessions.
+  - Under the *new* MSIX config (`EnableMsixTooling=true`, no
+    `WindowsPackageType=None` override), `dotnet build -c Release
+    -p:Platform=x64` **succeeds** — confirmed directly, not assumed —
+    and `dotnet build ... -p:GenerateAppxPackageOnBuild=true` produces a
+    real (unsigned) `.msix`. MSIX packaging apparently uses a different
+    PRI-generation path (`makepri.exe`, bundled via the
+    `Microsoft.Windows.SDK.BuildTools` NuGet package's own content)
+    that doesn't depend on the VS-only DLL the unpackaged path needed.
+  - **What's still true**: there's no test project for the App layer,
+    and CLI building it still can't substitute for an actual F5 run
+    (rendering, XAML layout, click-through behavior) — none of that
+    changed. What changed is narrowly "the App project's C#/XAML now
+    compiles from a plain CLI," which is still genuinely useful (it's
+    how this session verified the packaging config without needing
+    Alan's Visual Studio session first) but isn't the same as "fully
+    CLI-testable."
+  - If `WindowsPackageType=None` is ever reintroduced for any reason,
+    expect the old `MSB4062` wall back — this isn't a permanent toolchain
+    fix, it's specific to the packaged code path.
+- ulong stored as signed long in SQLite; cast on read with (ulong)GetInt64().
+- Always parse DateTime from SQLite with DateTimeStyles.RoundtripKind.
+- **`NavigationView.PaneBackground` set directly (as a control property,
+  in XAML or code) reproducibly crashes the WinAppSDK 1.6.250205002 XAML
+  compiler** (`XamlCompiler.exe` exits 1, zero diagnostic output) —
+  confirmed by bisection, see Status for the full writeup. If the pane's
+  own fill needs to differ from the rest of `NavigationView`, override
+  the `NavigationViewDefaultPaneBackground` theme resource key in
+  `App.xaml`'s `ResourceDictionary.ThemeDictionaries` instead (a plain
+  resource-dictionary entry — no property-setter codegen involved, not
+  subject to this crash). Don't re-attempt the property directly without
+  confirming a newer WindowsAppSDK actually accepts it first.
 - ulong stored as signed long in SQLite; cast on read with (ulong)GetInt64().
 - Always parse DateTime from SQLite with DateTimeStyles.RoundtripKind.
 - **`NavigationView.PaneBackground` set directly (as a control property,
@@ -1564,6 +2299,98 @@ ThumbnailCache-backed preview thumbnails.
     verified (a script comparing key sets across all three JSON files),
     not as a persisted xUnit test, since Data.Tests has no reason to
     reference the App project's bundled `Strings/` content.
+- **Localization — genuinely complete this time.** Two more leaks found
+  in Chinese mode, same class of gap as the earlier "ViewModel-computed
+  status strings were missed" sessions, both now closed:
+  - **Organization's tree-node file-count text** (`OrganizationTreeNode.
+    DisplayText`, e.g. "2024 (312 files)") lived in **Core**
+    (`OrganizationTreeBuilder`), hardcoded English pluralization, with
+    no way to reach `LocalizationService` (Core never references Data/
+    App). Fixed with the same delegate-injection pattern already
+    established for `OrganizationPlanner.BuildHierarchy`'s
+    `categoryFolderName` parameter: `DisplayText` changed from a
+    computed property to a settable one (mirroring `CategoryGroup.
+    Label`'s earlier change for the same reason), and
+    `OrganizationTreeBuilder.BuildTree` gained two optional parameters
+    — `monthName` (`Func<int, string>`) and `formatGroupDisplayText`
+    (`Func<string, int, string>`) — both defaulting to the exact
+    original English behavior (`CultureInfo.CurrentCulture` month names,
+    `"{label} ({count} file(s))"` pluralization) when omitted, so every
+    existing test needed zero changes. `OrganizationViewModel` supplies
+    localized versions of both, reading two new dictionary keys:
+    `Organization.TreeNodeGroupLabel` (`"{0} ({1})"` composing the
+    already-resolved label with `Organization.TotalFiles`' existing
+    `"{0} file(s)"` wording — no new count-wording key needed, reused
+    what already existed) and the month-name keys below.
+  - **Month names were English everywhere** — the TreeView preview
+    (`OrganizationTreeBuilder`'s Month node `Label`) AND, more
+    seriously, **the real on-disk folder name** written by
+    `OrganizationExecutor` (`OrganizationPlanner`'s hybrid `"01 -
+    January"` format) — both used `CultureInfo.CurrentCulture` directly,
+    same root cause as the file-count text above (Core has no
+    LocalizationService access). Fixed the same way: added 12 new keys,
+    `Common.Month.1` through `Common.Month.12`, to all three dictionaries
+    (English month names for `dev`/`en`; `"1月"`–`"12月"` for `zh` — the
+    numeral+月 form, not literal translated names like "一月", matching
+    the established "everyday, non-technical vocabulary" convention this
+    file's earlier Chinese-translation session already established).
+    `OrganizationPlanner.BuildHierarchy` gained an optional `monthName`
+    parameter (`Func<int, string>`, same default-preserves-old-behavior
+    pattern as `categoryFolderName`), threaded into the existing
+    `FormatMonthFolder` helper (now takes the resolver instead of calling
+    `CultureInfo` itself) — this is the one with an actual functional,
+    on-disk consequence, not just display text, same category as the
+    Photo/NoMetadata folder-name localization from the original session.
+    `OrganizationTreeBuilder.BuildTree`'s new `monthName` parameter
+    (above) covers the TreeView preview side.
+    `OrganizationViewModel.ResolveMonthName(int)` is the one new
+    resolver method supplying both call sites — reads
+    `Common.Month.{month}` through `LocalizationService`, same
+    fallback-to-Dev behavior as every other key.
+  - **Folder-name safety, confirmed rather than assumed** (same check
+    applied to `Organization.FolderName.Photo`/`.NoMetadata` in the
+    original Chinese-translation session): `"1月"`–`"12月"` contain none
+    of Windows' forbidden path characters, no trailing dots/spaces, and
+    aren't reserved device names — safe as real folder names.
+  - **Chronological sort preserved regardless of language, confirmed by
+    inspection, not just assumed**: the hybrid folder name's sort-safety
+    comes entirely from the leading zero-padded `"NN - "` prefix
+    (`FormatMonthFolder`'s `$"{month:D2} - {monthName(month)}"`) — the
+    month-name suffix has never been what File Explorer sorts on, in
+    English or any other language, so localizing that suffix has no
+    bearing on sort order. This was true before this fix too (English
+    month names don't sort alphabetically into chronological order any
+    more than Chinese ones would — "April" sorts before "January"
+    alphabetically) — the `"NN - "` prefix is doing 100% of the
+    sort-correctness work, unchanged by this session.
+  - **Full grep for remaining `CultureInfo`/hardcoded-English date or
+    string formatting across the App project** — done, per the request,
+    not skipped: the only remaining `CultureInfo` usages anywhere in
+    `ImageCleanup.Core` (grepped directly) are the two default-fallback
+    lambdas inside `OrganizationTreeBuilder.BuildTree` and
+    `OrganizationPlanner.BuildHierarchy` themselves — these are
+    *correct*, not leftover bugs: they're what a caller gets if they
+    *don't* supply a `monthName` resolver (preserving every existing
+    Core-level test's expected English output), and the App layer's
+    `OrganizationViewModel` always supplies the localized resolver in
+    practice, so this fallback path is never actually exercised when the
+    app runs. No other `CultureInfo`, `GetMonthName`, or hardcoded
+    English month-name literal exists anywhere in `ImageCleanup.App`.
+  - 12 new keys × 3 languages = 36 new entries, plus
+    `Organization.TreeNodeGroupLabel` × 3 = 39 total — confirmed
+    key-for-key identical across `dev.json`/`en.json`/`zh.json` (116
+    keys each, verified by script, same method as every prior parity
+    check in this file).
+  - **Not automated-test-covered for the localized-wiring itself**
+    (`OrganizationViewModel.ResolveMonthName`/`FormatGroupDisplayText`) —
+    same WinUI-layer constraint as every other `LocalizationService`
+    consumer in the App project. What *is* tested: the Core-level
+    delegate-injection mechanism itself (existing
+    `OrganizationTreeBuilderTests`/`OrganizationPlannerTests` continue
+    to pass unchanged against the new optional parameters, proving the
+    default-fallback path is byte-for-byte identical to the old
+    hardcoded behavior) — the same verification approach used for
+    `categoryFolderName` originally.
 
 ### Known gaps / not yet started
 **Current priority order for what's next** — only two items remain from
@@ -1572,9 +2399,21 @@ are all feature-complete, theme (Light/Dark, including pane elevation)
 is fully working, localization (Dev/English/Chinese) has complete
 coverage, and the single-photo view (Quality/Organization) closes out
 this round of UI polish:
-1. **Distribution/.exe packaging** — not started, and now the immediate
-   next priority (see the "No installer or distribution path" gap below
-   for the current constraint in detail).
+1. **Distribution/.exe packaging** — pivoted from unpackaged/self-contained
+   (confirmed unreliable — reliable `0xC000027B`/`combase.dll E_FAIL`
+   crash, see "Publishing — superseded" below for the full investigation)
+   to **MSIX packaging** (see the current Publishing section above),
+   which structurally avoids that crash class. Project is fully
+   reconfigured (Package.appxmanifest, placeholder icons, per-architecture
+   publish profiles) and the whole pipeline — build, sign, trust,
+   install, launch — was verified working end-to-end this session with a
+   throwaway test certificate. **Still needed**: Alan needs to run the
+   real **Create App Packages** wizard in Visual Studio (generates his
+   own, permanent signing certificate — the throwaway one used for
+   verification was deleted) and do a real end-user-style install to
+   confirm. Real branded icons (currently solid-color placeholders) and
+   an actual installer/updater story are the remaining open items after
+   that.
 2. **Video duplicate/near-duplicate detection** — not started at all,
    and deliberately deferred until after 1 above. The app only scans
    image files today (see ScanSessionService's ImageExtensions list);
@@ -1605,9 +2444,17 @@ Other known gaps (not on the roadmap above, but still open):
   given packaging friction, never revisited or decided. Core and Data have
   no UI framework dependency either way, so this is purely an App-layer
   question whenever it gets picked back up.
-- **No installer or distribution path** — the app currently only runs from
-  source via Visual Studio; framework-dependent, requires Windows App
-  Runtime 1.6.x installed on the target machine.
+- **No traditional installer yet, but MSIX packaging (see Publishing
+  above) now gets most of the way there for free** — an MSIX install IS
+  a real Windows install: Start Menu entry, normal uninstall via Settings
+  > Apps, no manual file copying. What's still missing is packaging that
+  install experience up more smoothly for a non-technical end user (right
+  now it's "trust a certificate, then run a PowerShell script," not a
+  single double-click installer) and real branded icons instead of the
+  current placeholders. A wrapping installer (WiX/Inno Setup) that
+  handles the certificate-trust step automatically is the natural next
+  step if the current PowerShell-script-based install (see "Installing
+  ImageCleanup" above) proves too much friction for real end users.
 - **Recursive scanning** is verified correct on nested folders (hidden/
   system/reparse-point skipping, graceful failure handling on
   inaccessible/missing directories — see Core.IO.ImageFileEnumerator) but
@@ -2360,3 +3207,160 @@ When run:
     types, which is the main integration risk this design was meant to
     avoid (nothing in the dialog itself is type-specific, but worth
     confirming directly rather than assuming).
+- **Platform-mismatch publish fix (new this session) — the two things
+  to verify are that F5 still works and that Publish no longer hits the
+  platform-mismatch error.**
+  - Open `ImageCleanup.sln`, confirm the Solution Configuration dropdown
+    in the toolbar is at its normal default ("Debug", "Any CPU"), and
+    press F5 — confirm the app still launches and runs exactly as
+    before (scan a folder, click through Duplicates/Quality/
+    Organization/Settings). This is the main regression risk from
+    changing the `.sln`'s `Any CPU` mapping — it's expected to now build
+    x64 instead of x86 under the hood, but should be behaviorally
+    identical since nothing in the app is architecture-specific.
+  - Run **Build > Configuration Manager** (or just glance at the
+    Solution Configuration dropdown while "Any CPU" is selected) and
+    confirm the ImageCleanup.App row now shows **x64** as its platform,
+    not x86 — this is the direct confirmation the `.sln` fix took
+    effect in the IDE, not just in the raw file.
+  - Publish using the existing `FolderProfile.pubxml` (right-click
+    ImageCleanup.App -> Publish -> Publish) — confirm it no longer
+    fails with `"The RuntimeIdentifier platform 'win-x64' and the
+    PlatformTarget 'x86' must be compatible"`, and confirm the publish
+    log now shows `Configuration: Release x64` (not `x86`) for the App
+    project.
+  - Confirm the publish otherwise completes and produces the same
+    output described in "Output location" above (the `.exe`, dependency
+    DLLs, bundled WindowsAppSDK/`.NET` runtime files, `Strings\`) — this
+    is the actual end-to-end proof the platform fix plus the
+    `WindowsAppSDKSelfContained`/`WindowsPackageType` additions to the
+    `.pubxml` (also made this session) together produce a working
+    self-contained output, not just that the error message went away.
+- **Startup crash fix — WindowsAppSDK version bump.** ***Superseded by
+  the MSIX packaging pivot below — the unpackaged approach this checklist
+  item verifies is no longer the recommended path at all, so this is
+  historical only. Skip straight to "MSIX packaging" below.*** Original
+  text kept for the record: re-publish via `FolderProfile.pubxml` and
+  check Event Viewer for the same `Microsoft.UI.Xaml.dll`/`0xC000027B`
+  and `combase.dll`/`80004005` signature if still investigating the
+  unpackaged path specifically for some reason.
+
+- **MSIX packaging (new this session) — this is the current, correct
+  path; everything above about the unpackaged/self-contained approach
+  is superseded.** The core pipeline (build → sign → trust → install →
+  launch) was already verified end-to-end this session using a
+  throwaway test certificate — it worked, and the crash this whole
+  pivot exists to avoid did not reproduce. What's left is Alan doing the
+  *real* version of that with his own permanent certificate:
+  - Open `ImageCleanup.sln`, confirm `Package.appxmanifest` appears in
+    Solution Explorer with no errors, double-click it — the visual
+    manifest designer should open showing Display Name "ImageCleanup",
+    Publisher "ImageCleanup", version 1.0.0.0, and a Packaging tab.
+  - Right-click ImageCleanup.App → Publish → **Create App Packages** →
+    Sideloading → create a new certificate (should pre-fill Subject as
+    `CN=ImageCleanup`, matching the manifest — if it doesn't, something's
+    out of sync and worth investigating before continuing) → x64 only →
+    "Never" generate an app bundle → Create.
+  - Confirm the output folder contains a `.msix`, a `.cer`, a
+    `Dependencies\` folder, and `Add-AppDevPackage.ps1` — per "Output &
+    distribution" above.
+  - **Simulate the real end-user experience** (ideally on a second
+    machine, or at minimum a separate Windows user account, so the
+    dev machine's own trust/registration doesn't mask a problem a real
+    end user would hit): follow "Installing ImageCleanup" above exactly
+    as written — trust the `.cer`, confirm/enable sideloading if needed,
+    run `Add-AppDevPackage.ps1`. Confirm the app installs without error
+    and appears in the Start Menu.
+  - Launch it from the Start Menu (not from Visual Studio) — confirm it
+    opens normally with **no crash**, and do a basic smoke test (select a
+    folder, confirm scanning works) to confirm this isn't just "didn't
+    crash on launch" but genuinely functional.
+  - Confirm normal Windows uninstall works: Settings → Apps → find
+    "ImageCleanup" → Uninstall — should remove cleanly, same as any
+    other installed app.
+  - If every check above passes: update the Known gaps entry for
+    Distribution/.exe packaging to reflect this is now verified, not
+    just configured — that status line currently says "still needed:
+    Alan needs to run the real wizard," which should change once this
+    is actually done.
+  - If installation or launch fails: capture the exact error (PowerShell
+    script output, or Event Viewer if it's a launch-time crash) —a
+    failure here would be a genuinely new finding (this exact pipeline
+    already succeeded once this session with a throwaway cert on this
+    same machine), so don't assume it's the same class of problem as the
+    old unpackaged crash without checking the actual error first.
+- **Localization — final two Chinese-mode gaps (new this session):
+  Organization's file-count text and month names, both TreeView preview
+  AND real on-disk folders.** Switch to Chinese in Settings, restart
+  (per the established restart-for-already-open-pages caveat), scan a
+  folder, and open Organization:
+  - Confirm every tree node's text (Year/Month/Category — e.g. "2024
+    (312 张照片)") reads entirely in Chinese, including the count
+    wording — no stray "files" or "file(s)" in English anywhere in the
+    tree.
+  - Confirm Month nodes show Chinese month names ("3月", not "March" or
+    "三月") in the TreeView preview.
+  - **Run an actual Organize on a disposable test folder** (same
+    "throwaway files only" caution as every other real-move check in
+    this file) under Chinese mode, and check the created folders
+    directly in File Explorer (not just the app's tree preview) —
+    confirm the month folders are named like "03 - 3月" (the hybrid
+    zero-padded-number-plus-localized-name format), not "03 - March".
+    This is the one part of this fix with a real, on-disk consequence,
+    not just cosmetic text — worth checking directly in Explorer rather
+    than trusting the in-app preview alone.
+  - Confirm File Explorer still sorts these Chinese-named month folders
+    chronologically (03 before 04, etc.) exactly as the English-named
+    ones always did — the sort-correctness comes entirely from the
+    leading zero-padded number, so this should be unaffected, but worth
+    a direct look since it's the property this whole hybrid-naming
+    scheme exists to guarantee.
+  - Repeat the same TreeView/status-text check under English mode too
+    (confirm "2024 (312 photo(s))"-style wording, not the old "review
+    staged"-era phrasing) — this pass touched `en.json` as much as
+    `zh.json`, so both are worth a glance, not just Chinese.
+  - Switch back to Dev language and confirm the tree/month-name text
+    reads exactly as it always has (plain English "2024 (312 files)",
+    "March") — this is the "Dev is provably unchanged" bar every
+    localization pass in this file has been held to; if anything looks
+    different under Dev, that's a bug in this fix, not an intentional
+    change.
+- **F5 debugging after MSIX packaging (new this session) — this is the
+  main thing to verify, since it was a real, reported crash blocking
+  day-to-day development, not a hypothetical.** See "F5 debugging needs
+  its own local deploy" under Publishing above for the full writeup.
+  - In Visual Studio, open **Build → Configuration Manager** and confirm
+    the **Deploy** checkbox is now checked for **ImageCleanup.App**
+    across Debug/x64 (the config F5 actually uses by default) — this
+    confirms the `.sln` fix took effect in the IDE, not just in the raw
+    file.
+  - Press **F5**. Confirm the app builds, deploys, and launches
+    normally — **no `COMException: Class not registered
+    (0x80040154)`**, no crash of any kind on startup.
+  - Do a basic smoke test while debugging (select a folder, confirm
+    scanning/Duplicates/Quality/Organization all still work) — this
+    confirms it's a genuinely working debug session, not just "didn't
+    crash within the first second."
+  - Set a breakpoint somewhere in App-layer code (e.g.
+    `OrganizationViewModel.RebuildAsync`) and confirm it's hit normally
+    — full debugging (not just launch-and-run) is the actual point of
+    F5, worth confirming explicitly rather than assuming it follows from
+    "the app launched."
+  - Stop debugging, then **re-run Create App Packages** (Publish →
+    Create App Packages → reuse the existing certificate) and confirm
+    it still succeeds and produces an installable `.msix` exactly as
+    before — the claim that the F5 fix doesn't touch the Release
+    packaging path is based on reasoning about what each changed file
+    is read by (`.sln` Deploy flags and `launchSettings.json` are both
+    IDE/debug-launch-only, confirmed via a CLI `dotnet build`
+    comparison), not an actual Visual-Studio-driven re-verification —
+    worth closing that gap directly since packaging is the whole reason
+    this pivot happened in the first place.
+  - If F5 still crashes with the same `0x80040154` error after both
+    fixes: check that the Debug|x64 configuration is what's actually
+    active in the Solution Configuration dropdown (not Debug|x86 or
+    Debug|Any CPU somehow still resolving differently than expected),
+    and confirm `Properties\launchSettings.json` is actually present in
+    `src\ImageCleanup.App\` and shows up in Solution Explorer under the
+    project (sometimes needs **Show All Files** toggled if it doesn't
+    appear automatically).

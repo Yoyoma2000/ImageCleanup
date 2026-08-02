@@ -29,9 +29,11 @@ public static class OrganizationPlanner
     /// </summary>
     public static OrganizationPlan BuildHierarchy(
         IEnumerable<ImageRecord> records,
-        Func<MetadataCategory, string>? categoryFolderName = null)
+        Func<MetadataCategory, string>? categoryFolderName = null,
+        Func<int, string>? monthName = null)
     {
         var resolveCategoryName = categoryFolderName ?? (category => category.ToString());
+        var resolveMonthName = monthName ?? (month => new DateTime(1, month, 1).ToString("MMMM", CultureInfo.CurrentCulture));
 
         var classified = records
             .Select(r => (
@@ -58,7 +60,7 @@ public static class OrganizationPlanner
                             .Select(categoryGroup =>
                             {
                                 var categoryName = resolveCategoryName(categoryGroup.Key);
-                                var targetFolder = $"{yearGroup.Key:D4}/{FormatMonthFolder(monthGroup.Key)}/{categoryName}";
+                                var targetFolder = $"{yearGroup.Key:D4}/{FormatMonthFolder(monthGroup.Key, resolveMonthName)}/{categoryName}";
                                 var files = ResolveFileNames(
                                     categoryGroup.Select(x => x.Record),
                                     targetFolder);
@@ -128,13 +130,18 @@ public static class OrganizationPlanner
     /// Hybrid month folder name for the real, on-disk destination path —
     /// e.g. "03 - March". Two-digit zero-padded number sorts correctly in
     /// File Explorer (pure word names sort alphabetically, not
-    /// chronologically); the month name keeps it readable (pure numbers
-    /// aren't). This is distinct from the TreeView preview's word-only
-    /// month label (OrganizationTreeBuilder) — that's an in-app list where
-    /// chronological filesystem sort isn't a concern, so it stays as-is.
+    /// chronologically) regardless of what language the month name itself
+    /// is in — the leading "NN - " prefix is what carries the sort order,
+    /// so a localized name here doesn't affect chronological sort any
+    /// differently than the English default did. The month name keeps it
+    /// readable (pure numbers aren't). This is distinct from the TreeView
+    /// preview's word-only month label (OrganizationTreeBuilder) — that's
+    /// an in-app list where chronological filesystem sort isn't a
+    /// concern, so it stays as-is (also localized, via its own monthName
+    /// parameter, but independently of this method).
     /// </summary>
-    private static string FormatMonthFolder(int month) =>
-        $"{month:D2} - {new DateTime(1, month, 1).ToString("MMMM", CultureInfo.CurrentCulture)}";
+    private static string FormatMonthFolder(int month, Func<int, string> monthName) =>
+        $"{month:D2} - {monthName(month)}";
 
     private static string GetParentFolderName(string filePath)
     {
