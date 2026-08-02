@@ -9,7 +9,7 @@
   <Identity
     Name="ImageCleanup"
     Publisher="CN=alanq"
-    Version="1.0.0.0" />
+    Version="1.0.1.0" />
 
   <Properties>
     <DisplayName>ImageCleanup</DisplayName>
